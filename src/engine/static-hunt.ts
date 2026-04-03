@@ -237,16 +237,6 @@ export class StaticHuntEngine extends EventEmitter {
     if (this.encounterLog.length > 200) this.encounterLog.shift();
 
     if (detection.isShiny) {
-      // False positive check: if nature is Serious and we keep seeing it on attempt 1,
-      // it's likely reading slot 1 (shiny Dragonair) instead of slot 2 (Eevee)
-      // Quick stats check to verify we're looking at the right Pokemon
-      const quickStats = await extractStats(frame).catch(() => null);
-      if (quickStats && quickStats.hp === 87 && quickStats.attack === 66 && quickStats.defense === 49) {
-        logger.warn(`[Static Hunt] FALSE POSITIVE: stats match Dragonair in slot 1 (HP:87 ATK:66 DEF:49). Wrong party slot! Resetting...`);
-        this.state = 'SOFT_RESET';
-        return;
-      }
-
       const ts = Date.now();
       // Save summary page 1 (info + shiny border)
       const screenshotPath = path.join(process.cwd(), config.paths.screenshots,
