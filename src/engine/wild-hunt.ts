@@ -387,14 +387,13 @@ export class WildHuntEngine extends EventEmitter {
       }
     }
 
-    // Save debug screenshot for shinies or every 500th encounter
-    if (isShiny || this.encounters % 500 === 0) {
+    // Only screenshot when timing says shiny
+    if (isShiny) {
       try {
         const debugFrame = lastFrame || await this.frameSource.captureFrame();
-        const label = isShiny ? 'SHINY' : 'sample';
         const debugPath = path.join(
           process.cwd(), config.paths.screenshots,
-          `wild-debug-${this.encounters}-${label}-${Date.now()}.png`
+          `wild-debug-${this.encounters}-SHINY-${Date.now()}.png`
         );
         fs.writeFile(debugPath, debugFrame).catch(() => {});
       } catch { /* ignore */ }

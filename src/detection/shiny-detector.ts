@@ -174,36 +174,57 @@ function isSummaryScreenFromRaw(data: Buffer, info: RawImageInfo): boolean {
     return { r: data[idx], g: data[idx + 1], b: data[idx + 2] };
   };
 
-  // Check 1: Teal page indicator near top center (120, 5) — present for both normal and shiny
+  // PRIMARY CHECK: The summary screen's defining feature is the purple/teal border
+  // on the left panel. Sample border points and check for purple (normal) or teal (shiny).
+  // This is the most reliable signal and distinguishes summary from other screens.
+  const borderCheckPoints = [
+    { x: 10, y: 20 },
+    { x: 75, y: 20 },
+    { x: 10, y: 30 },
+  ];
+  let borderPurple = 0;
+  let borderTeal = 0;
+  for (const pt of borderCheckPoints) {
+    const p = getPixel(pt.x, pt.y);
+    const hsl = rgbToHsl(p.r, p.g, p.b);
+    // Need some saturation and mid-lightness (not white/black)
+    if (hsl.s < 0.08 || hsl.l < 0.2 || hsl.l > 0.85) continue;
+    // Purple: hue 240-320 (normal summary border)
+    if (hsl.h >= 240 && hsl.h <= 320) borderPurple++;
+    // Teal: hue 150-210 (shiny summary border)
+    if (hsl.h >= 150 && hsl.h <= 210) borderTeal++;
+  }
+  const hasSummaryBorder = (borderPurple + borderTeal) >= 2;
+
+  // SECONDARY CHECK: Teal page indicator near top center (120, 5)
   const pageIndicator = getPixel(120, 5);
   const piHsl = rgbToHsl(pageIndicator.r, pageIndicator.g, pageIndicator.b);
   const hasTealIndicator = piHsl.h >= 160 && piHsl.h <= 200 && piHsl.s > 0.2;
 
-  // Check 2: Right side should be light (cream/white), not dark
+  // TERTIARY CHECK: Right side should be light-ish (cream/white/beige), not dark
+  // Thresholds lowered for capture card images which are darker than emulator screenshots
   const rightPoints = [
     getPixel(200, 60),
     getPixel(220, 80),
     getPixel(200, 100),
   ];
   let lightCount = 0;
-  let brightYellowCount = 0;
   for (const p of rightPoints) {
-    if (p.r > 180 && p.g > 160 && p.b > 130) lightCount++;
-    if (p.r > 200 && p.g > 180 && p.b < 100) brightYellowCount++;
+    if (p.r > 120 && p.g > 110 && p.b > 90 && (p.r + p.g + p.b) > 380) lightCount++;
   }
 
-  // Reject naming screen (bright yellow background)
-  if (brightYellowCount >= 2) return false;
+  // REJECT: Uniform blue/teal screens (help screen, menus) — right side must be
+  // distinctly lighter than the border. Help screen is uniformly blue everywhere.
+  // Summary has purple/teal LEFT + cream/white RIGHT = high contrast.
+  if (hasSummaryBorder && borderTeal >= 2 && lightCount === 0) return false;
 
-  // Summary confirmed if: teal page indicator + light right side
-  if (hasTealIndicator && lightCount >= 2) return true;
+  // Summary confirmed if: has the characteristic purple/teal border + light right side
+  if (hasSummaryBorder && lightCount >= 1) return true;
 
-  // Fallback: colored UI element (purple or teal) at top-left + light right side
-  const topLeftUi = getPixel(10, 30);
-  const tlHsl = rgbToHsl(topLeftUi.r, topLeftUi.g, topLeftUi.b);
-  const hasColoredUi = tlHsl.s > 0.15 && tlHsl.l > 0.3 && tlHsl.l < 0.8;
+  // Also accept: purple border + teal indicator (normal Pokemon, capture card dark frame)
+  if (borderPurple >= 2 && hasTealIndicator) return true;
 
-  return hasColoredUi && lightCount >= 2;
+  return false;
 }
 
 interface SpriteAnalysis {

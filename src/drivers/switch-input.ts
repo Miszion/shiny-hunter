@@ -159,8 +159,7 @@ export class SwitchInput implements InputController {
     // NSO soft reset: A+B+X+Y held for 1 second (handled by ESP32 RESET command)
     await this.sendCommand('RESET', 5000);
     logger.info('NSO soft reset sent');
-    // After reset, NSO re-enumerates USB — wait for the controller to reconnect
-    // and the game to start booting
+    // Wait after reset — NSO needs time to process the reset
     await this.wait(2000);
   }
 

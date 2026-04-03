@@ -11,6 +11,8 @@ import { RngEngine } from './engine/rng-engine';
 import { SwitchRngEngine } from './engine/rng-switch';
 import { WildHuntEngine } from './engine/wild-hunt';
 import { StaticHuntEngine } from './engine/static-hunt';
+import { StaticRngEngine } from './engine/static-rng';
+import { SuspendRngEngine } from './engine/suspend-rng';
 import { startServer } from './server';
 import {
   createHunt,
@@ -25,6 +27,7 @@ import {
   notifyHuntStopped,
   notifyDailySummary,
 } from './services/discord';
+import { saveHuntState, loadHuntState, PersistedHuntState } from './hunt-state';
 
 async function main() {
   logger.info('=== Shiny Hunter starting ===');
@@ -72,11 +75,14 @@ async function main() {
   }
 
   // Create hunt engine based on mode + environment + hunt type
-  let engine: HuntEngine | RngEngine | SwitchRngEngine | WildHuntEngine | StaticHuntEngine;
+  let engine: HuntEngine | RngEngine | SwitchRngEngine | WildHuntEngine | StaticHuntEngine | StaticRngEngine | SuspendRngEngine;
 
   if (config.hunt.huntType === 'wild') {
     logger.info(`Mode: Wild encounter hunting (${config.hunt.target} in ${config.hunt.game})`);
     engine = new WildHuntEngine(frames, input);
+  } else if (config.hunt.huntType === 'static' && config.hunt.mode === 'switch-rng') {
+    logger.info(`Mode: Static encounter + RNG boot timing (${config.hunt.target} in ${config.hunt.game})`);
+    engine = new StaticRngEngine(frames, input);
   } else if (config.hunt.huntType === 'static') {
     logger.info(`Mode: Static encounter hunting (${config.hunt.target} in ${config.hunt.game})`);
     engine = new StaticHuntEngine(frames, input);
@@ -88,6 +94,9 @@ async function main() {
     const rng = new RngEngine(frames, input as EmulatorInput);
     if (config.hunt.targetNature) rng.setTargetNature(config.hunt.targetNature);
     engine = rng;
+  } else if (config.hunt.mode === 'suspend-rng') {
+    logger.info('Mode: Suspend-point RNG (frame counting + suspend points)');
+    engine = new SuspendRngEngine(frames, input);
   } else if (config.hunt.mode === 'switch-rng') {
     logger.info('Mode: Switch RNG (blind timing — no memory reads)');
     engine = new SwitchRngEngine(frames, input);
@@ -96,17 +105,56 @@ async function main() {
     engine = new HuntEngine(frames, input);
   }
 
+  // Stop hunt if capture card loses signal (Switch undocked).
+  // Only trigger if hunt has been running >30s to avoid false positives
+  // from stale counter that accumulated before the hunt started.
+  if (frames instanceof CaptureCardFrames) {
+    frames.onSignalLost = () => {
+      const status = engine.getStatus();
+      if (status.running && status.elapsedSeconds > 30) {
+        logger.info('[Signal] Capture card signal lost — stopping hunt');
+        engine.stop();
+      }
+    };
+  }
+
   // Track active hunt in DB
   let currentHuntId: number | null = null;
 
   engine.on('started', async (status) => {
     currentHuntId = createHunt(status.target, status.game);
+    saveHuntState({
+      hunting: true,
+      target: status.target,
+      game: status.game,
+      huntType: config.hunt.huntType,
+      huntMode: config.hunt.mode,
+      encounters: 0,
+      startedAt: status.startedAt,
+      savedAt: Date.now(),
+    });
     await notifyHuntStarted(status.target, status.game);
   });
+
+  let isShuttingDown = false;
 
   engine.on('stopped', async (status) => {
     if (currentHuntId) {
       endHunt(currentHuntId, 'abandoned', status.encounters);
+    }
+    // Only write hunting: false for manual stops, not during shutdown.
+    // During shutdown, we already saved hunting: true so auto-resume works.
+    if (!isShuttingDown) {
+      saveHuntState({
+        hunting: false,
+        target: status.target,
+        game: status.game,
+        huntType: config.hunt.huntType,
+        huntMode: config.hunt.mode,
+        encounters: status.encounters,
+        startedAt: status.startedAt,
+        savedAt: Date.now(),
+      });
     }
     await notifyHuntStopped(status);
     currentHuntId = null;
@@ -123,6 +171,16 @@ async function main() {
       );
       endHunt(currentHuntId, 'found', event.encounters);
     }
+    saveHuntState({
+      hunting: false,
+      target: event.pokemon,
+      game: config.hunt.game,
+      huntType: config.hunt.huntType,
+      huntMode: config.hunt.mode,
+      encounters: event.encounters,
+      startedAt: null,
+      savedAt: Date.now(),
+    });
     await notifyShinyFound(event);
     currentHuntId = null;
   });
@@ -134,11 +192,24 @@ async function main() {
     await notifyMilestone(status);
   });
 
-  // Periodic encounter count save (every 50 encounters)
+  // Periodic state save (every 10s) - keeps hunt-state.json fresh for auto-resume on SIGKILL
   let lastSavedEncounters = 0;
   const saveInterval = setInterval(() => {
     if (currentHuntId && engine.getStatus().running) {
-      const enc = engine.getStatus().encounters;
+      const status = engine.getStatus();
+      const enc = status.encounters;
+      // Always persist hunt state for auto-resume
+      saveHuntState({
+        hunting: true,
+        target: status.target,
+        game: status.game,
+        huntType: config.hunt.huntType,
+        huntMode: config.hunt.mode,
+        encounters: enc,
+        startedAt: status.startedAt,
+        savedAt: Date.now(),
+      });
+      // Update DB every 50 encounters
       if (enc - lastSavedEncounters >= 50) {
         updateHuntEncounters(currentHuntId, enc);
         lastSavedEncounters = enc;
@@ -218,16 +289,59 @@ async function main() {
     dailyShinies++;
   });
 
-  // Start Express server (pass frame source for live view)
-  startServer(engine, frames);
+  // Start Express server (pass frame source for live view + input controller for debug)
+  startServer(engine, frames, input);
+
+  // Auto-resume: if we were hunting when we last shut down, restart automatically
+  const savedState = loadHuntState();
+  if (savedState && savedState.hunting) {
+    // Verify the saved state matches current config (target/game/hunt type)
+    const configMatch =
+      savedState.target === config.hunt.target &&
+      savedState.game === config.hunt.game &&
+      savedState.huntType === config.hunt.huntType;
+
+    if (configMatch) {
+      logger.info(`Auto-resuming hunt: ${savedState.target} in ${savedState.game} (was at ${savedState.encounters} encounters)`);
+      engine.start().catch((err) => {
+        logger.error(`Auto-resume hunt failed: ${err.message}`);
+      });
+    } else {
+      logger.info(
+        `Saved hunt state found but config changed ` +
+        `(saved: ${savedState.target}/${savedState.game}/${savedState.huntType}, ` +
+        `current: ${config.hunt.target}/${config.hunt.game}/${config.hunt.huntType}). ` +
+        `Skipping auto-resume.`
+      );
+      saveHuntState({ ...savedState, hunting: false, savedAt: Date.now() });
+    }
+  }
 
   // Graceful shutdown
   const shutdown = async () => {
+    isShuttingDown = true;
     logger.info('Shutting down...');
     clearInterval(saveInterval);
     clearInterval(dailyTracker);
     clearInterval(dailySummaryInterval);
     clearInterval(encounterTracker);
+
+    // Persist hunt state before stopping so auto-resume works on restart
+    const status = engine.getStatus();
+    if (status.running) {
+      saveHuntState({
+        hunting: true,
+        target: status.target,
+        game: status.game,
+        huntType: config.hunt.huntType,
+        huntMode: config.hunt.mode,
+        encounters: status.encounters,
+        startedAt: status.startedAt,
+        savedAt: Date.now(),
+      });
+      logger.info(`Hunt state saved for auto-resume (${status.encounters} encounters)`);
+    }
+
     engine.stop();
     await input.cleanup();
     await frames.cleanup();

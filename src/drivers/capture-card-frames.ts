@@ -22,8 +22,14 @@ export class CaptureCardFrames implements FrameSource {
   private latestFrameTime = 0;
   private running = false;
   private dashboardPollTimer: ReturnType<typeof setInterval> | null = null;
+  private signalLostTimer: ReturnType<typeof setInterval> | null = null;
+  private lastFrameSize = 0;
+  private staleCount = 0;
+  public onSignalLost: (() => void) | null = null;
 
   async init(): Promise<void> {
+    await this.killOrphanedFfmpeg();
+
     this.device = config.switch.captureDevice;
     if (!this.device) {
       this.device = await this.detectDevice();
@@ -60,6 +66,43 @@ export class CaptureCardFrames implements FrameSource {
         this.latestFrameTime = Date.now();
       } catch {}
     }, 500);
+
+    // Signal loss detection: if the tmp file stops changing, capture card lost input
+    // (e.g. Switch undocked). Check every 2s, trigger after 8 consecutive stale checks (16s).
+    // Threshold must be high enough to survive soft resets (screen goes black for ~5-7s,
+    // producing identical JPEG frames with the same file size).
+    this.signalLostTimer = setInterval(async () => {
+      try {
+        const stat = await fs.stat(this.tmpPath);
+        if (stat.size === this.lastFrameSize) {
+          this.staleCount++;
+          if (this.staleCount >= 8) {
+            logger.warn('[Capture] Signal lost — capture card has no input (Switch undocked?)');
+            this.staleCount = 0;
+            if (this.onSignalLost) this.onSignalLost();
+          }
+        } else {
+          this.staleCount = 0;
+          this.lastFrameSize = stat.size;
+        }
+      } catch {}
+    }, 2000);
+  }
+
+  private async killOrphanedFfmpeg(): Promise<void> {
+    try {
+      const { stdout } = await execFileAsync('pgrep', ['-f', `ffmpeg.*${this.tmpPath}`]);
+      const pids = stdout.trim().split('\n').filter(Boolean).map(Number);
+      for (const pid of pids) {
+        logger.warn(`[Capture] Killing orphaned ffmpeg process (PID ${pid})`);
+        try { process.kill(pid, 'SIGKILL'); } catch {}
+      }
+      if (pids.length > 0) {
+        await new Promise(r => setTimeout(r, 500));
+      }
+    } catch {
+      // pgrep exits non-zero when no matches — expected
+    }
   }
 
   private async startContinuousCapture(): Promise<void> {
@@ -183,6 +226,10 @@ export class CaptureCardFrames implements FrameSource {
     if (this.dashboardPollTimer) {
       clearInterval(this.dashboardPollTimer);
       this.dashboardPollTimer = null;
+    }
+    if (this.signalLostTimer) {
+      clearInterval(this.signalLostTimer);
+      this.signalLostTimer = null;
     }
     if (this.ffmpegProcess) {
       this.ffmpegProcess.kill('SIGTERM');

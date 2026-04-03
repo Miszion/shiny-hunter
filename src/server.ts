@@ -1,13 +1,18 @@
 import express from 'express';
 import { config } from './config';
 import { logger } from './logger';
-import { IHuntEngine, FrameSource } from './types';
+import { IHuntEngine, FrameSource, InputController, GBAButton } from './types';
 import { getAllHunts, getShinyFinds, getHuntStats } from './services/stats';
 import { SwitchRngEngine } from './engine/rng-switch';
 import { WildHuntEngine } from './engine/wild-hunt';
 import { StaticHuntEngine } from './engine/static-hunt';
+import { StaticRngEngine } from './engine/static-rng';
+import { SuspendRngEngine } from './engine/suspend-rng';
+import { detectShiny } from './detection/shiny-detector';
+import path from 'path';
+import fs from 'fs/promises';
 
-export function createServer(engine: IHuntEngine, frameSource?: FrameSource): express.Application {
+export function createServer(engine: IHuntEngine, frameSource?: FrameSource, inputController?: InputController): express.Application {
   const app = express();
   app.use(express.json());
 
@@ -35,6 +40,96 @@ export function createServer(engine: IHuntEngine, frameSource?: FrameSource): ex
         }
       } catch (err) {
         res.status(500).json({ error: 'frame unavailable' });
+      }
+    });
+  }
+
+  // MJPEG live stream -- reads raw JPEG from capture card for smooth viewing
+  if (frameSource) {
+    app.get('/api/stream', async (req, res) => {
+      res.setHeader('Content-Type', 'multipart/x-mixed-replace; boundary=frame');
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+
+      let running = true;
+      req.on('close', () => { running = false; });
+
+      const fs = await import('fs/promises');
+      const jpegPath = '/tmp/shiny-hunter-live.jpg';
+
+      while (running) {
+        try {
+          // Read raw JPEG directly from ffmpeg's output file -- no sharp processing
+          const raw = await fs.readFile(jpegPath);
+          if (raw.length > 500) {
+            res.write(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${raw.length}\r\n\r\n`);
+            res.write(raw);
+            res.write('\r\n');
+          }
+        } catch {
+          // File not ready, skip
+        }
+        // ~20 FPS for smoother viewing
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+    });
+  }
+
+  // Manual button press for debugging (only when hunt is NOT running)
+  if (inputController) {
+    app.post('/api/button', async (req, res) => {
+      if (engine.getStatus().running) {
+        res.status(400).json({ error: 'Cannot send buttons while hunt is running' });
+        return;
+      }
+      const { button, holdMs } = req.body;
+      const validButtons: GBAButton[] = ['A', 'B', 'START', 'SELECT', 'UP', 'DOWN', 'LEFT', 'RIGHT', 'L', 'R'];
+      if (!validButtons.includes(button)) {
+        res.status(400).json({ error: `Invalid button: ${button}. Valid: ${validButtons.join(', ')}` });
+        return;
+      }
+      try {
+        await inputController.pressButton(button, holdMs || 100);
+        res.json({ ok: true, button, holdMs: holdMs || 100 });
+      } catch (err) {
+        res.status(500).json({ error: String(err) });
+      }
+    });
+
+    app.post('/api/reset', async (_req, res) => {
+      if (engine.getStatus().running) {
+        res.status(400).json({ error: 'Cannot reset while hunt is running' });
+        return;
+      }
+      try {
+        await inputController.softReset();
+        res.json({ ok: true, action: 'soft_reset' });
+      } catch (err) {
+        res.status(500).json({ error: String(err) });
+      }
+    });
+  }
+
+  // Debug: capture + process frame and save as PNG, run shiny detection
+  if (frameSource) {
+    app.post('/api/debug/frame', async (_req, res) => {
+      try {
+        const frame = await frameSource.captureFrame();
+        const target = config.hunt.target;
+        const game = config.hunt.game;
+        const detection = await detectShiny(frame, target, game);
+        const filename = `debug-manual-${Date.now()}.png`;
+        const savePath = path.join(process.cwd(), config.paths.screenshots, filename);
+        await fs.writeFile(savePath, frame);
+        res.json({
+          saved: savePath,
+          filename,
+          detection,
+          frameSize: frame.length,
+        });
+      } catch (err) {
+        res.status(500).json({ error: String(err) });
       }
     });
   }
@@ -272,7 +367,7 @@ export function createServer(engine: IHuntEngine, frameSource?: FrameSource): ex
   }
 
   // === Static Hunt API ===
-  if (engine instanceof StaticHuntEngine) {
+  if (engine instanceof StaticHuntEngine || engine instanceof StaticRngEngine) {
     const staticEngine = engine;
 
     app.get('/api/static/encounters', (_req, res) => {
@@ -290,6 +385,51 @@ export function createServer(engine: IHuntEngine, frameSource?: FrameSource): ex
 
     app.get('/dashboard', (_req, res) => {
       res.send(STATIC_DASHBOARD_HTML);
+    });
+  }
+
+  // === Suspend RNG API ===
+  if (engine instanceof SuspendRngEngine) {
+    const suspendEngine = engine;
+
+    app.get('/api/suspend/encounters', (_req, res) => {
+      const status = suspendEngine.getStatus();
+      const elapsed = status.startedAt ? (Date.now() - status.startedAt) / 1000 : 0;
+      const rate = elapsed > 0 ? (status.encounters / elapsed) * 3600 : 0;
+      const cal = suspendEngine.getCalibration();
+      const fcStats = suspendEngine.getFrameCounterStats();
+      res.json({
+        encounters: status.encounters,
+        elapsed: Math.round(elapsed),
+        rate: Math.round(rate),
+        target: status.target,
+        calibration: {
+          complete: cal.calibrationComplete,
+          observations: cal.observations.length,
+          frameToAdvanceOffset: cal.frameToAdvanceOffset,
+          initialSeed: `0x${cal.initialSeed.toString(16).padStart(8, '0')}`,
+        },
+        frameCounter: fcStats,
+        log: suspendEngine.encounterLog.slice(-50).reverse(),
+      });
+    });
+
+    app.get('/api/suspend/calibration', (_req, res) => {
+      const cal = suspendEngine.getCalibration();
+      res.json({
+        tid: cal.tid,
+        sid: cal.sid,
+        initialSeed: `0x${cal.initialSeed.toString(16).padStart(8, '0')}`,
+        observations: cal.observations,
+        frameToAdvanceOffset: cal.frameToAdvanceOffset,
+        advancesPerFrame: cal.advancesPerFrame,
+        calibrationComplete: cal.calibrationComplete,
+        lastUpdated: cal.lastUpdated,
+      });
+    });
+
+    app.get('/dashboard', (_req, res) => {
+      res.send(SUSPEND_DASHBOARD_HTML);
     });
   }
 
@@ -328,7 +468,7 @@ const STATIC_DASHBOARD_HTML = `<!DOCTYPE html>
 </div>
 <div class="stats" id="stats"></div>
 <div class="log-wrap"><table><thead><tr>
-  <th>#</th><th>Time</th><th>Nature</th><th>Gender</th><th>Detection</th>
+  <th>#</th><th>Time</th><th>Nature</th><th>Gender</th><th>Stats</th><th>IVs</th>
 </tr></thead><tbody id="log"></tbody></table></div>
 <script>
 function ago(ts) {
@@ -352,7 +492,9 @@ async function refresh() {
       const cls = e.isShiny ? 'shiny' : '';
       const gender = e.gender === 'male' ? '<span class="male">&#9794;</span>'
         : e.gender === 'female' ? '<span class="female">&#9792;</span>' : '?';
-      return '<tr class="'+cls+'"><td>'+e.attempt+'</td><td><span class="ago">'+ago(e.time)+'</span></td><td>'+e.nature+'</td><td>'+gender+'</td><td>'+e.detectionDebug+'</td></tr>';
+      const st = e.stats ? 'HP:'+e.stats.hp+' A:'+e.stats.attack+' D:'+e.stats.defense+' SA:'+e.stats.spAtk+' SD:'+e.stats.spDef+' SP:'+e.stats.speed : '-';
+      const ivs = e.ivRanges || '-';
+      return '<tr class="'+cls+'"><td>'+e.attempt+'</td><td><span class="ago">'+ago(e.time)+'</span></td><td>'+e.nature+'</td><td>'+gender+'</td><td>'+st+'</td><td style="font-size:10px">'+ivs+'</td></tr>';
     }).join('');
   } catch(e) { console.error(e); }
 }
@@ -560,8 +702,87 @@ setInterval(function() {
 }, 100);
 </script></body></html>`;
 
-export function startServer(engine: IHuntEngine, frameSource?: FrameSource): void {
-  const app = createServer(engine, frameSource);
+const SUSPEND_DASHBOARD_HTML = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Suspend RNG Dashboard</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, monospace; background: #1a1a2e; color: #e0e0e0; padding: 16px; }
+  h1 { color: #ffd700; font-size: 20px; margin-bottom: 12px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; margin-bottom: 16px; }
+  .stat { background: #16213e; border-radius: 8px; padding: 12px; text-align: center; }
+  .stat .val { font-size: 24px; font-weight: bold; color: #00d4ff; }
+  .stat .label { font-size: 11px; color: #888; margin-top: 4px; }
+  .cal { color: #0f0; }
+  .cal.pending { color: #ff0; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { background: #16213e; color: #888; padding: 6px 8px; text-align: left; position: sticky; top: 0; }
+  td { padding: 5px 8px; border-bottom: 1px solid #222; }
+  tr:hover { background: #16213e; }
+  .shiny { background: #3d2e00 !important; color: #ffd700; }
+  .log-wrap { max-height: 60vh; overflow-y: auto; }
+  .game-view { text-align: center; margin-bottom: 16px; }
+  .game-view img { width: 720px; height: 480px; image-rendering: pixelated; border: 2px solid #333; border-radius: 8px; background: #000; }
+  .game-view .label { font-size: 11px; color: #666; margin-top: 4px; }
+</style></head><body>
+<h1>Suspend-Point RNG Hunt</h1>
+<div class="game-view">
+  <img id="gameview" src="/api/frame" alt="Game View" onerror="this.style.opacity=0.3">
+  <div class="label">Live Game View</div>
+</div>
+<div class="stats">
+  <div class="stat"><div class="val" id="encounters">-</div><div class="label">Attempts</div></div>
+  <div class="stat"><div class="val" id="rate">-</div><div class="label">Per Hour</div></div>
+  <div class="stat"><div class="val" id="elapsed">-</div><div class="label">Elapsed</div></div>
+  <div class="stat"><div class="val" id="calStatus">-</div><div class="label">Calibration</div></div>
+  <div class="stat"><div class="val" id="offset">-</div><div class="label">Frame Offset</div></div>
+  <div class="stat"><div class="val" id="seed">-</div><div class="label">Initial Seed</div></div>
+</div>
+<div class="log-wrap">
+  <table><thead><tr>
+    <th>#</th><th>Target Frame</th><th>Exp. Advance</th><th>Nature</th><th>Gender</th><th>Possible Advances</th><th>Shiny</th>
+  </tr></thead><tbody id="log"></tbody></table>
+</div>
+<script>
+function refresh() {
+  fetch('/api/suspend/encounters').then(r => r.json()).then(function(d) {
+    document.getElementById('encounters').textContent = d.encounters;
+    document.getElementById('rate').textContent = d.rate;
+    var m = Math.floor(d.elapsed / 60), s = d.elapsed % 60;
+    document.getElementById('elapsed').textContent = m + 'm ' + s + 's';
+    var cal = d.calibration || {};
+    var calEl = document.getElementById('calStatus');
+    calEl.textContent = cal.complete ? 'DONE (' + cal.observations + ' obs)' : cal.observations + '/' + 8;
+    calEl.className = 'val cal' + (cal.complete ? '' : ' pending');
+    document.getElementById('offset').textContent = cal.frameToAdvanceOffset !== null ? cal.frameToAdvanceOffset : '?';
+    document.getElementById('seed').textContent = cal.initialSeed || '?';
+    var log = d.log || [];
+    var tbody = document.getElementById('log');
+    tbody.innerHTML = '';
+    log.forEach(function(e) {
+      var tr = document.createElement('tr');
+      if (e.isShiny) tr.className = 'shiny';
+      tr.innerHTML = '<td>' + e.attempt + '</td>' +
+        '<td>' + e.targetFrame + '</td>' +
+        '<td>' + e.expectedAdvance + '</td>' +
+        '<td>' + e.observedNature + '</td>' +
+        '<td>' + e.observedGender + '</td>' +
+        '<td>' + (e.possibleAdvances || []).slice(0,5).join(', ') + '</td>' +
+        '<td>' + (e.isShiny ? 'YES' : '-') + '</td>';
+      tbody.appendChild(tr);
+    });
+  }).catch(function(){});
+}
+refresh();
+setInterval(refresh, 5000);
+setInterval(function() {
+  var img = document.getElementById('gameview');
+  if (img) { img.src = '/api/frame?t=' + Date.now(); img.style.opacity = 1; }
+}, 100);
+</script></body></html>`;
+
+export function startServer(engine: IHuntEngine, frameSource?: FrameSource, inputController?: InputController): void {
+  const app = createServer(engine, frameSource, inputController);
   app.listen(config.server.port, () => {
     logger.info(`Server listening on http://localhost:${config.server.port}`);
   });

@@ -61,6 +61,8 @@ const BASE_STATS: Record<string, BaseStats> = {
   nidoranf:   { hp: 55, atk: 47, def: 52, spa: 40, spd: 40, spe: 41 }, // Nidoran♀
   // Casino Pokemon
   dratini:    { hp: 41, atk: 64, def: 45, spa: 50, spd: 50, spe: 50 },
+  // Gift Pokemon (Celadon Mansion — Lv25 in FRLG)
+  eevee:      { hp: 55, atk: 55, def: 50, spa: 45, spd: 65, spe: 55 },
 };
 
 function calcHPStat(base: number, iv: number, level: number): number {

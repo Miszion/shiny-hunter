@@ -15,8 +15,8 @@ export const config = {
     saveStateSlot: parseInt(process.env.SAVE_STATE_SLOT || '1', 10),
     turboEnabled: process.env.TURBO_ENABLED !== 'false',
     milestoneInterval: 500,
-    // Hunt mode: 'reset' | 'rng' (emulator memory reads) | 'switch-rng' (blind timing, no memory reads)
-    mode: (process.env.HUNT_MODE || 'reset') as 'reset' | 'rng' | 'switch-rng',
+    // Hunt mode: 'reset' | 'rng' (emulator memory reads) | 'switch-rng' (blind timing, no memory reads) | 'suspend-rng' (suspend point + frame counting)
+    mode: (process.env.HUNT_MODE || 'reset') as 'reset' | 'rng' | 'switch-rng' | 'suspend-rng',
     // Hunt type: 'starter' | 'wild' | 'static' | 'casino'
     // starter: pick starter from pokeball, check summary
     // wild: walk in grass/water, detect shiny sparkle in battle

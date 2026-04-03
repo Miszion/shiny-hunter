@@ -11,6 +11,7 @@ data/*.db-wal
 # Caches & calibration
 data/seed-schedule-cache.json
 data/switch-calibration.json
+data/hunt-state.json
 
 # Downloaded sprites (re-generated via scripts/extract-palettes.ts)
 data/sprites/

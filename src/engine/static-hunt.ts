@@ -6,24 +6,9 @@ import { config } from '../config';
 import { logger } from '../logger';
 import { detectShiny } from '../detection/shiny-detector';
 import { extractSummaryInfo } from '../detection/summary-info';
+import { extractStats, StatValues } from '../detection/stats-ocr';
+import { computeIVRanges } from './iv-calc';
 import { getStaticSequences } from './sequences';
-
-/**
- * Static encounter shiny hunt engine.
- *
- * Used for: fossil revival (Cinnabar Lab), gift Pokemon, casino prizes, etc.
- *
- * Flow:
- * 1. Game is pre-saved in front of the NPC who gives the Pokemon
- * 2. Soft reset
- * 3. Load save → interact with NPC (mash A through dialogue) → receive Pokemon
- * 4. Open summary → check if shiny
- * 5. If not shiny → soft reset and repeat
- *
- * The received Pokemon goes into the party. PARTY_SLOT config determines
- * which slot to check in the summary (default: 2, since most setups have
- * 1 Pokemon + the new one).
- */
 
 type StaticHuntState =
   | 'IDLE'
@@ -45,9 +30,8 @@ export class StaticHuntEngine extends EventEmitter {
   private input: InputController;
   private target: string;
   private game: string;
-  private partySlot: number; // 1-based slot of the received Pokemon
+  private partySlot: number;
 
-  // Encounter log for dashboard
   public encounterLog: Array<{
     attempt: number;
     time: number;
@@ -55,6 +39,8 @@ export class StaticHuntEngine extends EventEmitter {
     gender: string;
     isShiny: boolean;
     detectionDebug: string;
+    stats?: StatValues;
+    ivRanges?: string;
   }> = [];
 
   constructor(frameSource: FrameSource, input: InputController) {
@@ -83,17 +69,13 @@ export class StaticHuntEngine extends EventEmitter {
 
   async start(): Promise<void> {
     if (this.running) return;
-
     logger.info(`[Static Hunt] Starting: ${this.target} in ${this.game}`);
-    logger.info(`[Static Hunt] Party slot: ${this.partySlot} (set PARTY_SLOT env to change)`);
-    logger.info('[Static Hunt] Shiny detection: summary screen border color');
-
+    logger.info(`[Static Hunt] Party slot: ${this.partySlot}`);
     this.running = true;
     this.attempts = 0;
     this.startedAt = Date.now();
     this.state = 'SOFT_RESET';
     this.emit('started', this.getStatus());
-
     while (this.running) {
       try {
         await this.tick();
@@ -119,136 +101,123 @@ export class StaticHuntEngine extends EventEmitter {
         await this.input.softReset();
         this.state = 'WAIT_BOOT';
         break;
-
       case 'WAIT_BOOT':
-        // Wait for BIOS + Game Freak logo
-        await this.wait(config.env === 'switch' ? 6000 : 4500);
+        // Switch Sloop uses hardware entropy for seeds (proven via chi-squared test).
+        // No need for random timing variation. Just wait for boot to finish.
+        await this.wait(config.env === 'switch' ? 2500 : 3000);
         this.state = 'TITLE_AND_LOAD';
         break;
-
       case 'TITLE_AND_LOAD':
         await this.titleAndLoad();
         break;
-
       case 'INTERACT':
         await this.interactWithNPC();
         break;
-
       case 'OPEN_SUMMARY':
         await this.openSummary();
         break;
-
       case 'READ_RESULT':
         await this.readAndProcess();
         break;
-
       case 'SHINY_FOUND':
         logger.info('[Static Hunt] *** SHINY FOUND! ***');
         this.stop();
         break;
-
       case 'RESET':
         this.state = 'SOFT_RESET';
         break;
-
       case 'IDLE':
         await this.wait(100);
         break;
     }
   }
 
-  /**
-   * Mash through title screen and load save.
-   */
   private async titleAndLoad(): Promise<void> {
     const seqs = getStaticSequences(this.game, this.target);
 
-    // Title screen
+    // Title screen — A spam + START presses
     await this.executeSequence(seqs.title);
 
-    // Load save
+    // Load save — select CONTINUE
     await this.executeSequence(seqs.loadSave);
 
-    // Mash through recap dialogue (generous A pressing)
-    for (let i = 0; i < 12 && this.running; i++) {
-      await this.input.pressButton('A', 50);
-      await this.wait(300);
+    // B-spam through recap dialogue — tightened for speed
+    for (let i = 0; i < 20 && this.running; i++) {
+      await this.input.pressButton('B', 50);
+      await this.wait(150);
     }
-    await this.wait(500);
+    await this.wait(400);
 
     logger.info('[Static Hunt] Save loaded, ready to interact');
     this.state = 'INTERACT';
   }
 
-  /**
-   * Interact with the NPC to receive the Pokemon.
-   */
   private async interactWithNPC(): Promise<void> {
+    // No random delay needed — Switch Sloop uses hardware entropy for seeds.
     const seqs = getStaticSequences(this.game, this.target);
     await this.executeSequence(seqs.interact);
     logger.info('[Static Hunt] Interaction complete, opening summary');
     this.state = 'OPEN_SUMMARY';
   }
 
-  /**
-   * Open the party menu and navigate to the correct slot for summary.
-   */
   private async openSummary(): Promise<void> {
-    // START → POKéMON
+    // Open party menu — tightened timings for speed
     await this.input.pressButton('START', 50);
     await this.wait(400);
+    await this.input.pressButton('DOWN', 50);
+    await this.wait(150);
     await this.input.pressButton('A', 50);
-    await this.wait(600);
+    await this.wait(1500); // Party screen load
 
-    // Navigate DOWN to the correct party slot
-    // Slot 1 = no DOWN presses, Slot 2 = 1 DOWN, etc.
-    for (let i = 1; i < this.partySlot; i++) {
-      await this.input.pressButton('DOWN', 50);
-      await this.wait(200);
+    // Navigate to slot 2
+    if (this.partySlot >= 2) {
+      await this.input.pressButton('RIGHT', 100);
+      await this.wait(250);
+    }
+    for (let i = 3; i <= this.partySlot; i++) {
+      await this.input.pressButton('DOWN', 100);
+      await this.wait(250);
     }
 
-    // Select the Pokemon
-    await this.input.pressButton('A', 50);
-    await this.wait(400);
-
-    // SUMMARY option
+    // Select + Summary
     await this.input.pressButton('A', 50);
     await this.wait(500);
-
-    // Safety A + wait for summary screen render
     await this.input.pressButton('A', 50);
-    await this.wait(1300);
+    await this.wait(1400); // Summary screen load
 
     this.state = 'READ_RESULT';
   }
 
-  /**
-   * Read the summary screen and check for shiny.
-   */
   private async readAndProcess(): Promise<void> {
     this.attempts++;
 
-    const frame = await this.frameSource.captureFrame();
-    const detection = await detectShiny(frame, this.target, this.game);
+    let frame = await this.frameSource.captureFrame();
+    let detection = await detectShiny(frame, this.target, this.game);
 
-    // Save encounter screenshot (non-blocking)
-    try {
-      const debugPath = path.join(
-        process.cwd(), config.paths.screenshots,
-        `static-${this.target}-${this.attempts}-${Date.now()}.png`
-      );
-      fs.writeFile(debugPath, frame).catch(() => {});
-    } catch { /* ignore */ }
+    for (let retry = 0; retry < 3 && detection.debugInfo === 'not on summary screen'; retry++) {
+      logger.info(`[Static Hunt] Summary screen not detected, retry ${retry + 1}/3...`);
+      await this.wait(300);
+      frame = await this.frameSource.captureFrame();
+      detection = await detectShiny(frame, this.target, this.game);
+    }
 
-    // Extract nature + gender from summary
+    if (this.attempts % 100 === 1) {
+      try {
+        const debugPath = path.join(process.cwd(), config.paths.screenshots,
+          `static-${this.target}-${this.attempts}-${Date.now()}.png`);
+        fs.writeFile(debugPath, frame).catch(() => {});
+      } catch {}
+    }
+
     let nature: string | null = null;
     let gender: 'male' | 'female' | 'unknown' = 'unknown';
+
     if (detection.debugInfo !== 'not on summary screen') {
       try {
         const info = await extractSummaryInfo(frame, { skipTID: true });
         nature = info.nature;
         gender = info.gender;
-      } catch { /* ignore */ }
+      } catch {}
     }
 
     const logLine = `[Static Hunt] Attempt #${this.attempts} | ` +
@@ -257,7 +226,6 @@ export class StaticHuntEngine extends EventEmitter {
       `${detection.debugInfo}`;
     logger.info(logLine);
 
-    // Log encounter
     this.encounterLog.push({
       attempt: this.attempts,
       time: Date.now(),
@@ -269,11 +237,47 @@ export class StaticHuntEngine extends EventEmitter {
     if (this.encounterLog.length > 200) this.encounterLog.shift();
 
     if (detection.isShiny) {
-      const screenshotPath = path.join(
-        process.cwd(), config.paths.screenshots,
-        `static-shiny-${this.target}-${Date.now()}.png`
-      );
+      // False positive check: if nature is Serious and we keep seeing it on attempt 1,
+      // it's likely reading slot 1 (shiny Dragonair) instead of slot 2 (Eevee)
+      // Quick stats check to verify we're looking at the right Pokemon
+      const quickStats = await extractStats(frame).catch(() => null);
+      if (quickStats && quickStats.hp === 87 && quickStats.attack === 66 && quickStats.defense === 49) {
+        logger.warn(`[Static Hunt] FALSE POSITIVE: stats match Dragonair in slot 1 (HP:87 ATK:66 DEF:49). Wrong party slot! Resetting...`);
+        this.state = 'SOFT_RESET';
+        return;
+      }
+
+      const ts = Date.now();
+      // Save summary page 1 (info + shiny border)
+      const screenshotPath = path.join(process.cwd(), config.paths.screenshots,
+        `static-shiny-${this.target}-${ts}.png`);
       await fs.writeFile(screenshotPath, frame);
+      logger.info(`[Static Hunt] *** SHINY SUMMARY saved: ${screenshotPath}`);
+
+      // Navigate to stats page (RIGHT) and read stats for SID deduction
+      await this.input.pressButton('RIGHT', 100);
+      await this.wait(2000);
+      let shinyStats: StatValues | null = null;
+      for (let retry = 0; retry < 5 && !shinyStats; retry++) {
+        const statsFrame = await this.frameSource.captureFrame();
+        const statsPath = path.join(process.cwd(), config.paths.screenshots,
+          `static-shiny-${this.target}-STATS-${ts}-${retry}.png`);
+        await fs.writeFile(statsPath, statsFrame);
+        shinyStats = await extractStats(statsFrame);
+        if (!shinyStats) await this.wait(500);
+      }
+
+      if (shinyStats) {
+        logger.info(`[Static Hunt] *** SHINY STATS: HP:${shinyStats.hp} ATK:${shinyStats.attack} DEF:${shinyStats.defense} SPA:${shinyStats.spAtk} SPD:${shinyStats.spDef} SPE:${shinyStats.speed}`);
+        if (nature) {
+          const ranges = computeIVRanges(this.target, 24, nature, shinyStats);
+          if (ranges) {
+            logger.info(`[Static Hunt] *** SHINY IVs: HP:${ranges.hp} ATK:${ranges.atk} DEF:${ranges.def} SPA:${ranges.spa} SPD:${ranges.spd} SPE:${ranges.spe}`);
+          }
+        }
+      } else {
+        logger.warn('[Static Hunt] *** Could not read shiny stats — check screenshots manually');
+      }
 
       this.emit('shiny', {
         pokemon: this.target,
@@ -282,17 +286,15 @@ export class StaticHuntEngine extends EventEmitter {
         screenshotPath,
         nature: nature ?? '?',
         gender,
+        stats: shinyStats,
       });
-
       this.state = 'SHINY_FOUND';
       return;
     }
 
-    // Emit milestone every 100 encounters
     if (this.attempts % 100 === 0) {
       this.emit('milestone', this.getStatus());
     }
-
     this.state = 'RESET';
   }
 

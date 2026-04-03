@@ -24,19 +24,20 @@ export interface StatValues {
   speed: number;
 }
 
-// 5x9 binary templates for digits 0-9, extracted from actual GBA capture card output.
+// 5x9 binary templates for digits 0-9, extracted from actual capture card output.
 // Each string is 45 chars: 9 rows of 5 pixels, '1'=dark, '0'=light.
+// Re-calibrated from MiraBox capture card at 240x160 resolution.
 const DIGIT_TEMPLATES: Record<number, string> = {
   0: '01110' + '10011' + '10001' + '10001' + '10001' + '10001' + '10001' + '10011' + '01110',
   1: '00100' + '01100' + '01100' + '00100' + '00100' + '00100' + '00100' + '00100' + '01110',
   2: '01110' + '10011' + '10001' + '00001' + '00010' + '00100' + '01000' + '10000' + '11111',
-  3: '01110' + '10011' + '00001' + '00001' + '00110' + '00011' + '00001' + '10001' + '11110',
-  4: '00010' + '00110' + '01010' + '01010' + '10010' + '11111' + '00010' + '00010' + '00010',
-  5: '11111' + '10000' + '10000' + '11110' + '00011' + '00001' + '00001' + '10011' + '01110',
-  6: '01110' + '10001' + '10000' + '10000' + '11110' + '10011' + '10001' + '10011' + '01110',
-  7: '11111' + '00001' + '00010' + '00010' + '00100' + '00100' + '01000' + '01000' + '01000',
-  8: '01110' + '10011' + '10001' + '10001' + '11110' + '10011' + '10001' + '10001' + '11110',
-  9: '01110' + '10011' + '10001' + '10001' + '01111' + '00011' + '00001' + '10001' + '11110',
+  3: '01110' + '10011' + '00001' + '00001' + '00110' + '00011' + '00001' + '10001' + '01110',
+  4: '00110' + '01110' + '01010' + '10110' + '10010' + '10010' + '11111' + '00110' + '00010',
+  5: '11111' + '10000' + '10000' + '10000' + '11110' + '00011' + '00001' + '10001' + '01110',
+  6: '01110' + '10011' + '10000' + '10000' + '11110' + '10011' + '10001' + '10001' + '01110',
+  7: '11111' + '00011' + '00001' + '00001' + '00010' + '00010' + '00100' + '00100' + '00100',
+  8: '01110' + '10011' + '10001' + '10001' + '11110' + '10011' + '10001' + '10001' + '01110',
+  9: '01110' + '10011' + '10001' + '10001' + '01111' + '00011' + '00001' + '10001' + '01110',
 };
 
 const THRESHOLD = 168; // Pixel brightness threshold: < 168 = text, >= 168 = background
@@ -103,6 +104,8 @@ function hasDarkPixels(pixels: Buffer, width: number, startX: number, startY: nu
   return darkCount >= 5; // Need at least 5 dark pixels to consider a digit present
 }
 
+const HUNDREDS_X = 219; // Hundreds digit: x=219 to x=223
+
 function recognizeNumber(pixels: Buffer, width: number, statY: number): number | null {
   // Always try units digit
   const unitsGrid = extractGrid(pixels, width, UNITS_X, statY);
@@ -114,6 +117,14 @@ function recognizeNumber(pixels: Buffer, width: number, statY: number): number |
     const tensGrid = extractGrid(pixels, width, TENS_X, statY);
     const tensMatch = matchDigit(tensGrid);
     if (tensMatch) {
+      // Check if hundreds digit exists
+      if (hasDarkPixels(pixels, width, HUNDREDS_X, statY)) {
+        const hundredsGrid = extractGrid(pixels, width, HUNDREDS_X, statY);
+        const hundredsMatch = matchDigit(hundredsGrid);
+        if (hundredsMatch) {
+          return hundredsMatch.digit * 100 + tensMatch.digit * 10 + unitsMatch.digit;
+        }
+      }
       return tensMatch.digit * 10 + unitsMatch.digit;
     }
   }
@@ -147,9 +158,9 @@ export async function extractStats(frameBuffer: Buffer): Promise<StatValues | nu
 
     const stats: StatValues = { hp, attack, defense, spAtk, spDef, speed };
 
-    // Validate — Lv5 starter stats should be in range ~8-22 (all 3 starters)
+    // Validate — stats should be reasonable (1-999)
     const values = Object.values(stats);
-    if (values.some(v => v < 5 || v > 30)) {
+    if (values.some(v => v < 1 || v > 999)) {
       return null;
     }
 

@@ -5,8 +5,10 @@ import { ButtonSequence } from '../types';
 
 // After BIOS + Game Freak logo (handled by WAIT_BOOT), spam through intro
 export const FIRE_RED_TITLE_SCREEN: ButtonSequence = [
-  // Spam START+A to skip intro/title as fast as possible
-  { action: 'mashA', count: 10, intervalMs: 400 },
+  // Use A to skip intro sequences, then START on title screen.
+  // Slower interval (350ms) to avoid overshooting past CONTINUE in the menu.
+  { action: 'mashA', count: 8, intervalMs: 350 },
+  // START presses to hit "PRESS START" on title screen
   { action: 'press', keys: ['START'], holdMs: 50 },
   { action: 'wait', ms: 200 },
   { action: 'press', keys: ['START'], holdMs: 50 },
@@ -160,6 +162,86 @@ export const FIRE_RED_OPEN_SUMMARY_SLOT1: ButtonSequence = [
   { action: 'wait', ms: 1300 },
 ];
 
+// === GAME CORNER PRIZE SEQUENCE (Celadon City) ===
+// Pre-condition: saved in front of the Game Corner prize counter.
+// Must have enough coins for the prize (Dratini = 2800 in LG, 4600 in FR).
+//
+// FRLG prize counter flow:
+// 1. Talk to clerk → "Welcome! Would you like a prize?"  (A)
+// 2. Prize list appears (Dratini is a listed option) → select it (A)
+// 3. "A DRATINI, is that right?" → YES (A)
+// 4. "[PLAYER] received a DRATINI!" + fanfare jingle (~3s)
+// 5. "Would you like to give a nickname?" → B (NO)
+// 6. Post-text — may return to prize list, press B to exit
+
+export const FRLG_CASINO_PRIZE: ButtonSequence = [
+  // Phase 1: Talk to clerk → "Want a prize?" → YES (default)
+  { action: 'press', keys: ['A'], holdMs: 50 },   // Initiate conversation
+  { action: 'wait', ms: 1000 },
+  { action: 'press', keys: ['A'], holdMs: 50 },   // Advance dialogue / select YES
+  { action: 'wait', ms: 1000 },                   // Wait for prize list to render
+
+  // Phase 2: Navigate DOWN to Dratini (3 DOWNs: ABRA → CLEFAIRY → PINSIR → DRATINI)
+  { action: 'press', keys: ['DOWN'], holdMs: 100 },
+  { action: 'wait', ms: 300 },
+  { action: 'press', keys: ['DOWN'], holdMs: 100 },
+  { action: 'wait', ms: 300 },
+  { action: 'press', keys: ['DOWN'], holdMs: 100 },
+  { action: 'wait', ms: 400 },
+
+  // Phase 3: Select Dratini → "So, you want the DRATINI?" YES/NO
+  { action: 'press', keys: ['A'], holdMs: 50 },
+  { action: 'wait', ms: 1000 },
+
+  // Phase 4: Confirm YES. Double-tap for reliability.
+  { action: 'press', keys: ['A'], holdMs: 50 },
+  { action: 'wait', ms: 350 },
+  { action: 'press', keys: ['A'], holdMs: 50 },
+
+  // Phase 5: Wait for purchase + fanfare (~2.8s)
+  { action: 'wait', ms: 2800 },
+
+  // Phase 6: B spam — decline nickname + exit
+  { action: 'mashB', count: 7, intervalMs: 280 },
+];
+
+// === EEVEE GIFT SEQUENCE (Celadon Condominiums rooftop) ===
+// Pre-condition: saved in front of the Pokeball on the table in the back
+// entrance rooftop room of Celadon Condominiums.
+//
+// Flow:
+// 1. A on Pokeball → "There's a POKé BALL on the desk. It contains EEVEE. Take it?"
+// 2. YES (default) → A
+// 3. "[PLAYER] received EEVEE!" + fanfare (~3s)
+// 4. "Would you like to give a nickname?" → B (NO)
+
+export const FRLG_EEVEE_INTERACT: ButtonSequence = [
+  // Phase 1: Interact with Pokeball
+  { action: 'press', keys: ['A'], holdMs: 50 },
+  { action: 'wait', ms: 800 },
+
+  // Phase 2: "Take it?" -> YES (A-spam)
+  { action: 'press', keys: ['A'], holdMs: 50 },
+  { action: 'wait', ms: 300 },
+  { action: 'press', keys: ['A'], holdMs: 50 },
+
+  // Phase 3: Receive + fanfare (tightened)
+  { action: 'wait', ms: 2500 },
+
+  // Phase 4: Decline nickname (rapid B)
+  { action: 'press', keys: ['B'], holdMs: 50 },
+  { action: 'wait', ms: 250 },
+  { action: 'press', keys: ['B'], holdMs: 50 },
+  { action: 'wait', ms: 250 },
+  { action: 'press', keys: ['B'], holdMs: 50 },
+  { action: 'wait', ms: 250 },
+  { action: 'press', keys: ['B'], holdMs: 50 },
+  { action: 'wait', ms: 250 },
+
+  // Dialogue close
+  { action: 'wait', ms: 300 },
+];
+
 // Map of game → starter → sequences
 export const SEQUENCES: Record<string, Record<string, {
   title: ButtonSequence;
@@ -218,11 +300,25 @@ export const STATIC_SEQUENCES: Record<string, Record<string, {
   summary: ButtonSequence;
 }>> = {
   'fire-red': {
+    // Casino prize (Celadon Game Corner — Lv18 in FR)
+    dratini: {
+      title: FIRE_RED_TITLE_SCREEN,
+      loadSave: FIRE_RED_LOAD_SAVE,
+      interact: FRLG_CASINO_PRIZE,
+      summary: FIRE_RED_OPEN_SUMMARY,
+    },
     // Gift Pokemon (Silph Co 7F — Lv25)
     lapras: {
       title: FIRE_RED_TITLE_SCREEN,
       loadSave: FIRE_RED_LOAD_SAVE,
       interact: FRLG_LAPRAS_INTERACT,
+      summary: FIRE_RED_OPEN_SUMMARY,
+    },
+    // Gift Pokemon (Celadon Condominiums rooftop — Lv25)
+    eevee: {
+      title: FIRE_RED_TITLE_SCREEN,
+      loadSave: FIRE_RED_LOAD_SAVE,
+      interact: FRLG_EEVEE_INTERACT,
       summary: FIRE_RED_OPEN_SUMMARY,
     },
     // Fossil Pokemon (Cinnabar Lab — Lv5)
@@ -246,10 +342,22 @@ export const STATIC_SEQUENCES: Record<string, Record<string, {
     },
   },
   'leaf-green': {
+    dratini: {
+      title: FIRE_RED_TITLE_SCREEN,
+      loadSave: FIRE_RED_LOAD_SAVE,
+      interact: FRLG_CASINO_PRIZE,
+      summary: FIRE_RED_OPEN_SUMMARY,
+    },
     lapras: {
       title: FIRE_RED_TITLE_SCREEN,
       loadSave: FIRE_RED_LOAD_SAVE,
       interact: FRLG_LAPRAS_INTERACT,
+      summary: FIRE_RED_OPEN_SUMMARY,
+    },
+    eevee: {
+      title: FIRE_RED_TITLE_SCREEN,
+      loadSave: FIRE_RED_LOAD_SAVE,
+      interact: FRLG_EEVEE_INTERACT,
       summary: FIRE_RED_OPEN_SUMMARY,
     },
     aerodactyl: {
