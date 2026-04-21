@@ -17,12 +17,16 @@ export const config = {
     milestoneInterval: 500,
     // Hunt mode: 'reset' | 'rng' (emulator memory reads) | 'switch-rng' (blind timing, no memory reads) | 'suspend-rng' (suspend point + frame counting)
     mode: (process.env.HUNT_MODE || 'reset') as 'reset' | 'rng' | 'switch-rng' | 'suspend-rng',
-    // Hunt type: 'starter' | 'wild' | 'static' | 'casino'
+    // Hunt type: 'starter' | 'wild' | 'static' | 'casino' | 'legendary'
     // starter: pick starter from pokeball, check summary
     // wild: walk in grass/water, detect shiny sparkle in battle
-    // static: redeem fossil/gift, check summary (TODO)
-    // casino: redeem casino prize, check summary (TODO)
-    huntType: (process.env.HUNT_TYPE || 'starter') as 'starter' | 'wild' | 'static' | 'casino',
+    // static: redeem fossil/gift, check summary
+    // casino: redeem casino prize, check summary
+    // legendary: approach stationary legendary (Articuno/Zapdos/Moltres/Mewtwo),
+    //   press A to trigger battle, detect shiny via battle sparkle animation,
+    //   soft-reset on non-shiny (no catching needed). Pre-save directly in front
+    //   of the legendary.
+    huntType: (process.env.HUNT_TYPE || 'starter') as 'starter' | 'wild' | 'static' | 'casino' | 'legendary',
     // Target nature for RNG mode (optional, e.g. 'adamant', 'jolly')
     targetNature: process.env.TARGET_NATURE || '',
   },

@@ -86,14 +86,13 @@ export const FIRE_RED_OPEN_SUMMARY: ButtonSequence = [
 // 7. [setflag] done
 
 export const FRLG_LAPRAS_INTERACT: ButtonSequence = [
-  // Phase 1: Talk to NPC — 3 text boxes before receiving
-  // "Oh! Hi! You're not a ROCKET!..." → "Why, thank you!" → "I want you to have this POKéMON"
+  // Phase 1: Talk to NPC — 3 text boxes before receiving the gift.
   { action: 'mashA', count: 5, intervalMs: 800 },
 
-  // Phase 2: "[PLAYER] obtained a LAPRAS!" + fanfare jingle (~3s)
+  // Phase 2: "[PLAYER] obtained a LAPRAS!" + fanfare jingle.
   { action: 'wait', ms: 3000 },
 
-  // Phase 3: "Would you like to give a nickname?" → NO
+  // Phase 3: nickname prompt → decline.
   { action: 'press', keys: ['B'], holdMs: 50 },
   { action: 'wait', ms: 400 },
   { action: 'press', keys: ['B'], holdMs: 50 },
@@ -101,15 +100,35 @@ export const FRLG_LAPRAS_INTERACT: ButtonSequence = [
   { action: 'press', keys: ['B'], holdMs: 50 },
   { action: 'wait', ms: 400 },
 
-  // Phase 4: Post-nickname explanation text (4 text boxes)
-  // "It's a LAPRAS. It's a very intelligent POKéMON."
-  // "We kept it in our lab, but it will be much better off with you."
-  // "I think you will be a good TRAINER for LAPRAS!"
-  // "It's a good swimmer. It'll give you a lift across water!"
+  // Phase 4: post-nickname explanation text (4 text boxes).
   { action: 'mashA', count: 6, intervalMs: 800 },
 
-  // Wait for dialogue to fully close
+  // Wait for dialogue to fully close.
   { action: 'wait', ms: 500 },
+];
+
+// === STATIC LEGENDARY ENCOUNTER SEQUENCE ===
+// Pre-condition: player saved directly in front of (and facing) the legendary.
+//   - Articuno: Seafoam Islands B4F
+//   - Zapdos: Power Plant
+//   - Moltres: Mt. Ember summit
+//   - Mewtwo: Cerulean Cave B1F
+//
+// Flow: single A press triggers the "Wild XXX appeared!" battle. PID is
+// generated at encounter-trigger time, so the advance count from title-press
+// to PID is short and narrow (≈100-200 wide vs ≈5,000 for Lapras gift).
+//
+// We DO NOT catch the legendary during hunting — we soft-reset on non-shiny.
+// The LegendaryHuntEngine uses battle-shiny.ts sparkle detection to read the
+// result without committing to the fight.
+
+export const FRLG_LEGENDARY_INTERACT: ButtonSequence = [
+  // Legendaries in FRLG require multiple A presses: first press triggers
+  // the cry/approach animation and a short dialog ("Gyaoo!" etc.) with
+  // the player still in overworld; subsequent A presses dismiss that
+  // dialog and initiate the battle proper. Empirically 4 A presses with
+  // ~800ms spacing engages reliably on Articuno/Zapdos/Moltres/Mewtwo.
+  { action: 'mashA', count: 4, intervalMs: 800 },
 ];
 
 // === FOSSIL REVIVAL SEQUENCES (Cinnabar Lab) ===
@@ -340,6 +359,33 @@ export const STATIC_SEQUENCES: Record<string, Record<string, {
       interact: FRLG_FOSSIL_INTERACT,
       summary: FIRE_RED_OPEN_SUMMARY,
     },
+    // Stationary legendary encounters — interact triggers a wild battle at Lv50
+    // (Mewtwo Lv70). `summary` sequence is unused for the legendary hunt path
+    // (LegendaryHuntEngine reads shiny-ness via battle sparkle, not summary).
+    articuno: {
+      title: FIRE_RED_TITLE_SCREEN,
+      loadSave: FIRE_RED_LOAD_SAVE,
+      interact: FRLG_LEGENDARY_INTERACT,
+      summary: FIRE_RED_OPEN_SUMMARY,
+    },
+    zapdos: {
+      title: FIRE_RED_TITLE_SCREEN,
+      loadSave: FIRE_RED_LOAD_SAVE,
+      interact: FRLG_LEGENDARY_INTERACT,
+      summary: FIRE_RED_OPEN_SUMMARY,
+    },
+    moltres: {
+      title: FIRE_RED_TITLE_SCREEN,
+      loadSave: FIRE_RED_LOAD_SAVE,
+      interact: FRLG_LEGENDARY_INTERACT,
+      summary: FIRE_RED_OPEN_SUMMARY,
+    },
+    mewtwo: {
+      title: FIRE_RED_TITLE_SCREEN,
+      loadSave: FIRE_RED_LOAD_SAVE,
+      interact: FRLG_LEGENDARY_INTERACT,
+      summary: FIRE_RED_OPEN_SUMMARY,
+    },
   },
   'leaf-green': {
     dratini: {
@@ -376,6 +422,33 @@ export const STATIC_SEQUENCES: Record<string, Record<string, {
       title: FIRE_RED_TITLE_SCREEN,
       loadSave: FIRE_RED_LOAD_SAVE,
       interact: FRLG_FOSSIL_INTERACT,
+      summary: FIRE_RED_OPEN_SUMMARY,
+    },
+    // Stationary legendary encounters — interact triggers a wild battle at Lv50
+    // (Mewtwo Lv70). `summary` sequence is unused for the legendary hunt path
+    // (LegendaryHuntEngine reads shiny-ness via battle sparkle, not summary).
+    articuno: {
+      title: FIRE_RED_TITLE_SCREEN,
+      loadSave: FIRE_RED_LOAD_SAVE,
+      interact: FRLG_LEGENDARY_INTERACT,
+      summary: FIRE_RED_OPEN_SUMMARY,
+    },
+    zapdos: {
+      title: FIRE_RED_TITLE_SCREEN,
+      loadSave: FIRE_RED_LOAD_SAVE,
+      interact: FRLG_LEGENDARY_INTERACT,
+      summary: FIRE_RED_OPEN_SUMMARY,
+    },
+    moltres: {
+      title: FIRE_RED_TITLE_SCREEN,
+      loadSave: FIRE_RED_LOAD_SAVE,
+      interact: FRLG_LEGENDARY_INTERACT,
+      summary: FIRE_RED_OPEN_SUMMARY,
+    },
+    mewtwo: {
+      title: FIRE_RED_TITLE_SCREEN,
+      loadSave: FIRE_RED_LOAD_SAVE,
+      interact: FRLG_LEGENDARY_INTERACT,
       summary: FIRE_RED_OPEN_SUMMARY,
     },
   },

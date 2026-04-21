@@ -781,6 +781,7 @@ setInterval(function() {
 }, 100);
 </script></body></html>`;
 
+
 export function startServer(engine: IHuntEngine, frameSource?: FrameSource, inputController?: InputController): void {
   const app = createServer(engine, frameSource, inputController);
   app.listen(config.server.port, () => {

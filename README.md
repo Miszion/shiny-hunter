@@ -3,9 +3,11 @@
 Automated shiny hunting for Pokemon FireRed/LeafGreen on real Nintendo Switch hardware (via GBA NSO app). Uses an ESP32-S3 as a USB gamepad emulator, a capture card for frame analysis, and visual detection to identify shiny Pokemon.
 
 <p align="center">
-  <img src="docs/shiny-charmander.png" alt="Shiny Charmander" width="480">
+  <img src="docs/shiny-charmander.png" alt="Shiny Charmander" width="280">
+  <img src="docs/shiny-dratini.png" alt="Shiny Dratini" width="280">
+  <img src="docs/shiny-eevee.png" alt="Shiny Eevee" width="280">
   <br>
-  <em>First catch — Shiny Charmander via RNG manipulation (TID 24248, Impish nature)</em>
+  <em>Shiny Charmander (starter RNG) · Shiny Dratini (Celadon casino soft-reset) · Shiny Eevee (Celadon Mansion gift soft-reset)</em>
 </p>
 
 ## Hardware Setup
@@ -82,25 +84,39 @@ HUNT_TYPE=wild
 
 Walks up/down → detects battle → OCRs species from text box → burst captures frames for sparkle detection + palette analysis → runs if not shiny, stops if shiny so you can catch manually.
 
-### Casino (Dratini)
+### Casino / Gift (Dratini, Eevee, etc.)
 
-*Not yet implemented.* Buy a Pokemon from the Celadon Game Corner prize counter.
+Soft-reset in front of the NPC that gives / sells the Pokemon. Same flow as other static hunts — just save in the right spot first.
 
 ```env
-TARGET_POKEMON=dratini
-HUNT_TYPE=casino
+TARGET_POKEMON=dratini   # or eevee, porygon, abra, scyther, ...
+HUNT_TYPE=static
+PARTY_SLOT=2             # match the party slot the gift lands in
+```
+
+Works for Celadon Game Corner prizes (Abra, Clefairy, Scyther, Pinsir, Dratini, Porygon), Celadon Mansion Eevee, fossils on Cinnabar, Lapras on Silph 7F, Hitmonlee / Hitmonchan, etc.
+
+### Legendary (Articuno, Zapdos, Moltres, Mewtwo, Snorlax)
+
+Soft-reset in front of the legendary Pokemon. Save directly in front of it before starting.
+
+```env
+TARGET_POKEMON=articuno
+HUNT_TYPE=static         # legendary encounters reuse the static engine
+PARTY_SLOT=1
 ```
 
 ## Target Shiny Team
 
 | # | Pokemon | Evolution | Hunt Type | Status |
 |---|---------|-----------|-----------|--------|
-| 1 | Charmander | Charizard | starter (RNG) | **Caught!** |
-| 2 | Aerodactyl | - | fossil | Pending |
-| 3 | Dratini | Dragonite | casino | Pending |
-| 4 | Lapras | - | static gift | Pending |
-| 5 | Pikachu | Raichu | wild | Hunting |
-| 6 | Nidoran | Nidoking/Nidoqueen | wild | Pending |
+| 1 | Charmander | Charizard | starter (RNG) | **Caught** |
+| 2 | Dratini | Dragonite | casino soft-reset | **Caught** |
+| 3 | Eevee | - | gift soft-reset | **Caught** |
+| 4 | Aerodactyl | - | fossil | Pending |
+| 5 | Lapras | - | static gift | Pending |
+| 6 | Articuno | - | legendary | Hunting |
+| 7 | Pikachu | Raichu | wild | Pending |
 
 ## Shiny Detection
 
@@ -147,13 +163,16 @@ src/
 
   engine/
     hunt-engine.ts           # Basic soft-reset engine
+    static-hunt.ts           # Static/fossil/gift/legendary soft-reset engine
+    legendary-hunt.ts        # Legendary encounter engine
+    wild-hunt.ts             # Wild encounter (walk-in-grass) engine
     rng-engine.ts            # RNG manipulation engine (emulator)
     rng-switch.ts            # Switch RNG engine (blind timing)
-    wild-hunt.ts             # Wild encounter engine
-    static-hunt.ts           # Static/fossil/gift engine
+    static-rng.ts            # Static + RNG boot timing
+    suspend-rng.ts           # Suspend-point RNG (frame counting)
+    rng.ts                   # PRNG (linear congruential, Gen 3)
     sequences.ts             # Button press sequences
     iv-calc.ts               # IV calculator
-    rng.ts                   # PRNG (linear congruential, Gen 3)
     pid-finder.ts            # PID identification from stats
     calibration.ts           # TID/SID calibration state
     multi-sid-target.ts      # Multi-SID seed scheduling

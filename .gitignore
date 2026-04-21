@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .env
+.claude/
 .DS_Store
 
 # Database
@@ -12,6 +13,7 @@ data/*.db-wal
 data/seed-schedule-cache.json
 data/switch-calibration.json
 data/hunt-state.json
+data/discord-bridge/
 
 # Downloaded sprites (re-generated via scripts/extract-palettes.ts)
 data/sprites/

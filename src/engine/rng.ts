@@ -28,6 +28,35 @@ export function advanceSeed(seed: number, frames: number): number {
   return s;
 }
 
+// Fast nextSeed using Math.imul (signed 32-bit multiply, ~100× faster than BigInt).
+// Mathematically identical to nextSeed — use freely for tight inner loops.
+export function nextSeedFast(seed: number): number {
+  return (Math.imul(seed, 0x41C64E6D) + 0x6073) >>> 0;
+}
+
+// O(log n) advance via binary-exponentiation of the LCG transformation.
+// For LCG s' = s*a + c, advancing n steps: s_n = s * a^n + c * (a^n - 1) / (a - 1).
+// Since we're mod 2^32, we compute a^n and the accumulated additive via doubling.
+export function jumpAhead(seed: number, n: number): number {
+  let mult = 1, add = 0;          // identity: s → 1*s + 0
+  let curMult = 0x41C64E6D, curAdd = 0x6073;  // single step
+  let k = n >>> 0;
+  while (k > 0) {
+    if (k & 1) {
+      // compose: (mult, add) ∘ (curMult, curAdd) means apply curMult/curAdd first, then mult/add
+      // s → curMult*s + curAdd → mult*(curMult*s + curAdd) + add = (mult*curMult)*s + (mult*curAdd + add)
+      add = (Math.imul(mult, curAdd) + add) >>> 0;
+      mult = Math.imul(mult, curMult) >>> 0;
+    }
+    // square: (curMult, curAdd)^2 means applying twice
+    // s → curMult*s + curAdd → curMult*(curMult*s + curAdd) + curAdd = curMult²*s + curMult*curAdd + curAdd
+    curAdd = (Math.imul(curMult, curAdd) + curAdd) >>> 0;
+    curMult = Math.imul(curMult, curMult) >>> 0;
+    k >>>= 1;
+  }
+  return (Math.imul(mult, seed >>> 0) + add) >>> 0;
+}
+
 // Method 1 PID generation: 2 RNG calls
 // Call 1 → PID_low (lower 16 bits)
 // Call 2 → PID_high (upper 16 bits)

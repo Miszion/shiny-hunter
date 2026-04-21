@@ -13,6 +13,7 @@ import { WildHuntEngine } from './engine/wild-hunt';
 import { StaticHuntEngine } from './engine/static-hunt';
 import { StaticRngEngine } from './engine/static-rng';
 import { SuspendRngEngine } from './engine/suspend-rng';
+import { LegendaryHuntEngine } from './engine/legendary-hunt';
 import { startServer } from './server';
 import {
   createHunt,
@@ -75,9 +76,12 @@ async function main() {
   }
 
   // Create hunt engine based on mode + environment + hunt type
-  let engine: HuntEngine | RngEngine | SwitchRngEngine | WildHuntEngine | StaticHuntEngine | StaticRngEngine | SuspendRngEngine;
+  let engine: HuntEngine | RngEngine | SwitchRngEngine | WildHuntEngine | StaticHuntEngine | StaticRngEngine | SuspendRngEngine | LegendaryHuntEngine;
 
-  if (config.hunt.huntType === 'wild') {
+  if (config.hunt.huntType === 'legendary') {
+    logger.info(`Mode: Legendary encounter hunting (${config.hunt.target} in ${config.hunt.game})`);
+    engine = new LegendaryHuntEngine(frames, input);
+  } else if (config.hunt.huntType === 'wild') {
     logger.info(`Mode: Wild encounter hunting (${config.hunt.target} in ${config.hunt.game})`);
     engine = new WildHuntEngine(frames, input);
   } else if (config.hunt.huntType === 'static' && config.hunt.mode === 'switch-rng') {
@@ -108,13 +112,13 @@ async function main() {
   // Stop hunt if capture card loses signal (Switch undocked).
   // Only trigger if hunt has been running >30s to avoid false positives
   // from stale counter that accumulated before the hunt started.
+  // NOTE: auto-stop on signal loss disabled — it fires false positives during
+  // long static screens (overworld sync wait, NPC dialog, save loading) where
+  // ffmpeg produces same-size JPEG frames even with valid game signal. User
+  // must stop manually if the capture card actually disconnects.
   if (frames instanceof CaptureCardFrames) {
     frames.onSignalLost = () => {
-      const status = engine.getStatus();
-      if (status.running && status.elapsedSeconds > 30) {
-        logger.info('[Signal] Capture card signal lost — stopping hunt');
-        engine.stop();
-      }
+      logger.warn('[Signal] Capture card appears stale — continuing hunt (auto-stop disabled)');
     };
   }
 

@@ -28,6 +28,8 @@ import { extractSummaryInfo } from '../detection/summary-info';
 import { extractStats, StatValues } from '../detection/stats-ocr';
 import { computeIVRanges } from './iv-calc';
 import { getStaticSequences } from './sequences';
+import { FrameCounter } from './frame-counter';
+import { CaptureCardFrames } from '../drivers/capture-card-frames';
 import {
   advanceSeed,
   nextSeed,
@@ -85,6 +87,21 @@ export class StaticRngEngine extends EventEmitter {
   private lastHitSeed = 0;
   private lastShinyAdvance = -1;
   private lastShinyNature = '';
+
+  // Week-1 frame-counting spike instrumentation. Off unless RNG_INSTRUMENT=true.
+  // When on, records per-attempt GBA frame counts at every button press and
+  // every visual event so we can measure the real variance of the dialog
+  // sequence and decide whether frame-synced inputs are worth the engineering.
+  private fc: FrameCounter | null = null;
+  private instrumentLog: Array<{ t: number; frame: number; label: string }> = [];
+
+  private logFC(label: string): void {
+    if (!this.fc) return;
+    const frame = this.fc.getFrameCount();
+    const t = Date.now();
+    this.instrumentLog.push({ t, frame, label });
+    logger.info(`[FC] f=${frame} t+${t - this.bootTimestamp}ms ${label}`);
+  }
 
   public encounterLog: Array<{
     attempt: number;
@@ -151,6 +168,19 @@ export class StaticRngEngine extends EventEmitter {
     logger.info(`[Static RNG] BIOS offset: ${this.biosOffsetMs}ms`);
     logger.info(`[Static RNG] Party slot: ${this.partySlot}`);
 
+    // Instrumentation: wire up FrameCounter if RNG_INSTRUMENT=true and we're
+    // running against real capture-card hardware.
+    if (process.env.RNG_INSTRUMENT === 'true' && this.frameSource instanceof CaptureCardFrames) {
+      this.fc = new FrameCounter(this.frameSource as CaptureCardFrames, { pollIntervalMs: 16 });
+      this.fc.on('transition', (e) => this.logFC(`event:transition diff=${e.diffPercent.toFixed(1)}%`));
+      this.fc.on('text_appeared', (e) => this.logFC('event:text_appeared'));
+      this.fc.on('text_cleared', (e) => this.logFC('event:text_cleared'));
+      this.fc.on('fade_to_black', (e) => this.logFC('event:fade_to_black'));
+      this.fc.on('fade_from_black', (e) => this.logFC('event:fade_from_black'));
+      await this.fc.start();
+      logger.info('[Static RNG] Instrumentation ON — FrameCounter attached');
+    }
+
     this.running = true;
     this.attempts = 0;
     this.skippedSeeds = 0;
@@ -172,6 +202,10 @@ export class StaticRngEngine extends EventEmitter {
 
   stop(): void {
     logger.info(`[Static RNG] Stopping after ${this.attempts} attempts (${this.skippedSeeds} seeds skipped)`);
+    if (this.fc) {
+      this.fc.stop();
+      this.fc = null;
+    }
     this.running = false;
     this.state = 'IDLE';
     this.emit('stopped', this.getStatus());
@@ -182,18 +216,25 @@ export class StaticRngEngine extends EventEmitter {
       case 'SOFT_RESET':
         await this.input.softReset();
         this.bootTimestamp = Date.now();
+        this.instrumentLog = []; // reset per-attempt log on each soft-reset
+        if (this.fc) this.fc.resetCounter();
+        this.logFC('state:SOFT_RESET');
         this.state = 'WAIT_BOOT';
         break;
 
       case 'WAIT_BOOT':
-        // Wait for BIOS + Game Freak logo. Do NOT press A — it would
-        // bypass the timed press and give a random seed.
+        // Wait for BIOS + intro logos. Do NOT press A — it would bypass the
+        // timed press and give a random seed. 6000ms is the empirically-
+        // calibrated minimum on this platform — 5000ms tested too short
+        // (title menu not ready, A press lost).
         await this.wait(config.env === 'switch' ? 6000 : 4500);
+        this.logFC('state:WAIT_BOOT done');
         this.state = 'TIMED_TITLE_PRESS';
         break;
 
       case 'TIMED_TITLE_PRESS':
         await this.timedTitlePress();
+        this.logFC('state:TIMED_TITLE_PRESS done (A pressed on title)');
         this.state = 'SEED_CHECK';
         break;
 
@@ -202,22 +243,36 @@ export class StaticRngEngine extends EventEmitter {
         break;
 
       case 'LOAD_SAVE':
+        this.logFC('state:LOAD_SAVE start');
         await this.loadSaveAndNavigate();
+        this.logFC('state:LOAD_SAVE done (save loaded, ready to interact)');
         this.state = 'INTERACT';
         break;
 
       case 'INTERACT':
+        this.logFC('state:INTERACT start');
         await this.interactWithNPC();
+        this.logFC('state:INTERACT done');
         this.state = 'OPEN_SUMMARY';
         break;
 
       case 'OPEN_SUMMARY':
+        this.logFC('state:OPEN_SUMMARY start');
         await this.openSummary();
+        this.logFC('state:OPEN_SUMMARY done');
         this.state = 'READ_RESULT';
         break;
 
       case 'READ_RESULT':
         await this.readAndProcess();
+        this.logFC(`state:READ_RESULT done (attempt #${this.attempts})`);
+        // Per-attempt instrumentation summary — one line of JSON for later analysis.
+        if (this.fc && this.instrumentLog.length > 0) {
+          const trace = this.instrumentLog.map((e) => ({
+            dt: e.t - this.bootTimestamp, f: e.frame, l: e.label,
+          }));
+          logger.info(`[FC-TRACE] attempt=${this.attempts} ${JSON.stringify(trace)}`);
+        }
         break;
 
       case 'SHINY_FOUND':
@@ -250,9 +305,17 @@ export class StaticRngEngine extends EventEmitter {
     // The step size (~61 microseconds per seed at 16384 Hz) means we sweep
     // through seeds one at a time by adding ~0.061ms per attempt.
 
-    // Pick the target timing. We sweep through seeds sequentially.
-    // Wrap around at 0xFFFF.
-    const targetSeed = this.attempts & 0xFFFF;
+    // Offset from the minimum reachable seed — seeds below that correspond
+    // to A-press times before the emulator is ready, which clamp to the
+    // min press time and collapse onto the same seed every attempt.
+    // With WAIT_BOOT=6000ms and biosOffsetMs=4500, the earliest reachable
+    // seed is ~0x6000.
+    const MIN_PRESS_MS_BUFFER = 6010; // 10ms slop above WAIT_BOOT end
+    const minReachableSeed = Math.floor(
+      ((MIN_PRESS_MS_BUFFER - this.biosOffsetMs) * 16384) / 1000,
+    ) & 0xffff;
+    const reachableRange = (0x10000 - minReachableSeed) & 0xffff;
+    const targetSeed = (minReachableSeed + (this.attempts % reachableRange)) & 0xffff;
     const targetTimingMs = seedToBootTimingMs(targetSeed, this.biosOffsetMs);
 
     // Wait until the target timing relative to boot
@@ -386,6 +449,16 @@ export class StaticRngEngine extends EventEmitter {
   }
 
   private async openSummary(): Promise<void> {
+    // Safety: if post-interact dialogue is still showing, START is ignored.
+    // Mash B a few times to force-close any residual dialogue before trying
+    // to open the party menu. B is safer than A here because A could trigger
+    // a new NPC conversation if we over-pressed.
+    for (let i = 0; i < 8 && this.running; i++) {
+      await this.input.pressButton('B', 50);
+      await this.wait(220);
+    }
+    await this.wait(500);
+
     await this.input.pressButton('START', 50);
     await this.wait(450);
     await this.input.pressButton('DOWN', 100);
@@ -439,11 +512,45 @@ export class StaticRngEngine extends EventEmitter {
       } catch {}
     }
 
-    const logLine = `[Static RNG] Visual check | ` +
+    // CALIBRATION MODE: read stats on every non-shiny attempt so we can
+    // back-solve the true Lapras advance N. IV ranges give ~30 bits of
+    // signal per observation vs ~5 bits from nature alone — enough to
+    // pin the advance within our ±32-seed timing jitter.
+    // Gate behind RNG_CALIBRATE_IVS=true so we can turn this off once
+    // the window is locked down and we want speed back.
+    let encounterStats: StatValues | null = null;
+    let encounterIvRanges: ReturnType<typeof computeIVRanges> = null;
+    const calibrateIVs = process.env.RNG_CALIBRATE_IVS === 'true';
+    if (
+      calibrateIVs &&
+      !detection.isShiny &&
+      detection.debugInfo !== 'not on summary screen' &&
+      nature
+    ) {
+      await this.input.pressButton('RIGHT', 100);
+      await this.wait(1400);
+      for (let r = 0; r < 3 && !encounterStats; r++) {
+        const sFrame = await this.frameSource.captureFrame();
+        encounterStats = await extractStats(sFrame);
+        if (!encounterStats) await this.wait(300);
+      }
+      if (encounterStats) {
+        encounterIvRanges = computeIVRanges(this.target, 25, nature, encounterStats);
+      }
+    }
+
+    const aPressMs = this.aPressTimestamp - this.bootTimestamp;
+    let logLine = `[Static RNG] Visual check | ` +
       `${detection.isShiny ? '*** SHINY! ***' : 'normal'} | ` +
       `Seed 0x${this.lastHitSeed.toString(16).padStart(4, '0')} adv ${this.lastShinyAdvance} | ` +
       `Nature: ${nature ?? '?'} (predicted: ${this.lastShinyNature}) | ` +
-      `Gender: ${gender} | ${detection.debugInfo}`;
+      `Gender: ${gender} | aPressMs=${aPressMs.toFixed(1)} | ${detection.debugInfo}`;
+    if (encounterStats) {
+      logLine += ` | stats=${encounterStats.hp}/${encounterStats.attack}/${encounterStats.defense}/${encounterStats.spAtk}/${encounterStats.spDef}/${encounterStats.speed}`;
+    }
+    if (encounterIvRanges) {
+      logLine += ` | IVs HP:${encounterIvRanges.hp.join(',')} ATK:${encounterIvRanges.atk.join(',')} DEF:${encounterIvRanges.def.join(',')} SPA:${encounterIvRanges.spa.join(',')} SPD:${encounterIvRanges.spd.join(',')} SPE:${encounterIvRanges.spe.join(',')}`;
+    }
     logger.info(logLine);
 
     this.encounterLog.push({
@@ -525,19 +632,23 @@ export class StaticRngEngine extends EventEmitter {
       if (!this.running) return;
       switch (step.action) {
         case 'press':
+          this.logFC(`press ${step.keys.join('+')} hold=${step.holdMs}`);
           await this.input.pressButtons(step.keys, step.holdMs);
           break;
         case 'wait':
+          this.logFC(`wait ${step.ms}ms`);
           await this.wait(step.ms);
           break;
         case 'mashA':
           for (let i = 0; i < step.count && this.running; i++) {
+            this.logFC(`mashA ${i + 1}/${step.count}`);
             await this.input.pressButton('A', 50);
             await this.wait(step.intervalMs);
           }
           break;
         case 'mashB':
           for (let i = 0; i < step.count && this.running; i++) {
+            this.logFC(`mashB ${i + 1}/${step.count}`);
             await this.input.pressButton('B', 50);
             await this.wait(step.intervalMs);
           }

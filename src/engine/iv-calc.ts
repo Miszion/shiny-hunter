@@ -63,6 +63,11 @@ const BASE_STATS: Record<string, BaseStats> = {
   dratini:    { hp: 41, atk: 64, def: 45, spa: 50, spd: 50, spe: 50 },
   // Gift Pokemon (Celadon Mansion — Lv25 in FRLG)
   eevee:      { hp: 55, atk: 55, def: 50, spa: 45, spd: 65, spe: 55 },
+  // Stationary legendaries (FRLG catch levels)
+  articuno:   { hp: 90, atk: 85, def: 100, spa: 95, spd: 125, spe: 85 },  // Lv50 Seafoam
+  zapdos:     { hp: 90, atk: 90, def: 85, spa: 125, spd: 90, spe: 100 },  // Lv50 Power Plant
+  moltres:    { hp: 90, atk: 100, def: 90, spa: 125, spd: 85, spe: 90 },  // Lv50 Mt. Ember
+  mewtwo:     { hp: 106, atk: 110, def: 90, spa: 154, spd: 90, spe: 130 }, // Lv70 Cerulean Cave
 };
 
 function calcHPStat(base: number, iv: number, level: number): number {
