@@ -46,30 +46,23 @@ export function evaluateTimingSignal(opts: {
   historySize: number;
   elapsedSinceBattle: number;
 }): TimingResult {
-  const { textDelayMs, avgDelay, historySize, elapsedSinceBattle } = opts;
-  const MIN_HISTORY = 5;
-  const HISTORY_MAX = 30;
+  const { textDelayMs, avgDelay, elapsedSinceBattle } = opts;
 
   if (textDelayMs !== null && textDelayMs > 0) {
-    // Absolute threshold: normal max across 10,243 encounters was 2481ms.
-    // Shiny adds 1300ms+. Any delay > 3500ms is definitively shiny.
-    if (textDelayMs > 3500) {
-      return { signal: 'shiny', debug: `delay=${textDelayMs}ms ABSOLUTE SHINY (>3500ms)` };
+    // Calibration reference (8832 non-shiny wild encounters): avg=2043ms,
+    // p50=2036, max=2429. Shiny catches (Voltorb/Pikachu): 3800ms+ or no-text
+    // at ~5s. There is a clean gap between ~2500 and ~3500 — no encounter
+    // ever landed there, so we binary-classify on a single 3000ms split.
+    //   delay > 3000ms  → SHINY  (worst-case normal was 2429)
+    //   delay ≤ 3000ms  → NORMAL
+    if (textDelayMs > 3000) {
+      const dev = avgDelay > 0 ? Math.round(textDelayMs - avgDelay) : null;
+      const devStr = dev !== null ? ` avg=${Math.round(avgDelay)}ms dev=+${dev}ms` : '';
+      return { signal: 'shiny', debug: `delay=${textDelayMs}ms${devStr} SHINY` };
     }
-
-    if (avgDelay > 0 && historySize >= MIN_HISTORY) {
-      const deviation = textDelayMs - avgDelay;
-      if (deviation > 1000) {
-        return { signal: 'shiny', debug: `delay=${textDelayMs}ms avg=${Math.round(avgDelay)}ms dev=+${Math.round(deviation)}ms SHINY` };
-      } else if (deviation > 600) {
-        return { signal: 'inconclusive', debug: `delay=${textDelayMs}ms avg=${Math.round(avgDelay)}ms dev=+${Math.round(deviation)}ms suspicious` };
-      } else if (deviation < 200) {
-        return { signal: 'normal', debug: `delay=${textDelayMs}ms avg=${Math.round(avgDelay)}ms dev=+${Math.round(deviation)}ms normal` };
-      } else {
-        return { signal: 'inconclusive', debug: `delay=${textDelayMs}ms avg=${Math.round(avgDelay)}ms dev=+${Math.round(deviation)}ms borderline` };
-      }
-    }
-    return { signal: 'inconclusive', debug: `delay=${textDelayMs}ms (calibrating: ${historySize}/${HISTORY_MAX} samples)` };
+    const dev = avgDelay > 0 ? Math.round(textDelayMs - avgDelay) : null;
+    const devStr = dev !== null ? ` avg=${Math.round(avgDelay)}ms dev=${dev >= 0 ? '+' : ''}${dev}ms` : '';
+    return { signal: 'normal', debug: `delay=${textDelayMs}ms${devStr} normal` };
   }
 
   // No text detected at all
