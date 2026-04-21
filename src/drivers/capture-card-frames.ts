@@ -118,8 +118,8 @@ export class CaptureCardFrames implements FrameSource {
       '-framerate', '30',
       '-video_size', '1920x1080',
       '-i', this.device,
-      '-vf', 'fps=10',
-      '-q:v', '2',
+      '-vf', 'fps=30',
+      '-q:v', '3',
       '-update', '1',
       this.tmpPath,
     ], { stdio: ['pipe', 'pipe', 'pipe'] });

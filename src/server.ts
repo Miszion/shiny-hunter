@@ -57,10 +57,17 @@ export function createServer(engine: IHuntEngine, frameSource?: FrameSource, inp
 
       const fs = await import('fs/promises');
       const jpegPath = '/tmp/shiny-hunter-live.jpg';
+      let lastMtimeMs = 0;
 
       while (running) {
         try {
-          // Read raw JPEG directly from ffmpeg's output file -- no sharp processing
+          // Only re-serve when ffmpeg has written a new frame (dedupe by mtime)
+          const stat = await fs.stat(jpegPath);
+          if (stat.mtimeMs === lastMtimeMs) {
+            await new Promise(r => setTimeout(r, 15));
+            continue;
+          }
+          lastMtimeMs = stat.mtimeMs;
           const raw = await fs.readFile(jpegPath);
           if (raw.length > 500) {
             res.write(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${raw.length}\r\n\r\n`);
@@ -68,10 +75,9 @@ export function createServer(engine: IHuntEngine, frameSource?: FrameSource, inp
             res.write('\r\n');
           }
         } catch {
-          // File not ready, skip
+          // File not ready, skip briefly
+          await new Promise(r => setTimeout(r, 20));
         }
-        // ~20 FPS for smoother viewing
-        await new Promise(resolve => setTimeout(resolve, 50));
       }
     });
   }

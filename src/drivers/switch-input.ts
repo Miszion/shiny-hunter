@@ -13,7 +13,7 @@ import { logger } from '../logger';
  *   HOLD <button>                 — hold until RELEASE
  *   RELEASE <button>              — release held button
  *   RELEASE_ALL                   — release everything
- *   RESET                         — A+B+X+Y for 1s (NSO soft reset)
+ *   RESET                         — A+B+X+Y for 1s (Switch soft reset)
  *   PING                          — returns PONG
  *   STATUS                        — returns HID_READY=true/false
  *
@@ -156,10 +156,10 @@ export class SwitchInput implements InputController {
   }
 
   async softReset(): Promise<void> {
-    // NSO soft reset: A+B+X+Y held for 1 second (handled by ESP32 RESET command)
+    // Switch soft reset: A+B+X+Y held for 1 second (handled by ESP32 RESET command)
     await this.sendCommand('RESET', 5000);
-    logger.info('NSO soft reset sent');
-    // Wait after reset — NSO needs time to process the reset
+    logger.info('Switch soft reset sent');
+    // Wait after reset — Switch needs time to process the reset
     await this.wait(2000);
   }
 
