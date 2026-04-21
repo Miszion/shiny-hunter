@@ -8,6 +8,7 @@ import { WildHuntEngine } from './engine/wild-hunt';
 import { StaticHuntEngine } from './engine/static-hunt';
 import { StaticRngEngine } from './engine/static-rng';
 import { SuspendRngEngine } from './engine/suspend-rng';
+import { LegendaryHuntEngine } from './engine/legendary-hunt';
 import { CaptureCardFrames } from './drivers/capture-card-frames';
 import { detectShiny } from './detection/shiny-detector';
 import path from 'path';
@@ -377,6 +378,28 @@ export function createServer(engine: IHuntEngine, frameSource?: FrameSource, inp
         rate: Math.round(rate),
         target: status.target,
         log: staticEngine.encounterLog.slice(-50).reverse(),
+      });
+    });
+
+    app.get('/dashboard', (_req, res) => {
+      res.send(STATIC_DASHBOARD_HTML);
+    });
+  }
+
+  // === Legendary Hunt API (reuses static dashboard — same stat cards, log table) ===
+  if (engine instanceof LegendaryHuntEngine) {
+    const legendaryEngine = engine;
+
+    app.get('/api/static/encounters', (_req, res) => {
+      const status = legendaryEngine.getStatus();
+      const elapsed = status.startedAt ? (Date.now() - status.startedAt) / 1000 : 0;
+      const rate = elapsed > 0 ? (status.encounters / elapsed) * 3600 : 0;
+      res.json({
+        encounters: status.encounters,
+        elapsed: Math.round(elapsed),
+        rate: Math.round(rate),
+        target: status.target,
+        log: legendaryEngine.encounterLog.slice(-50).reverse(),
       });
     });
 
