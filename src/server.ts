@@ -463,7 +463,7 @@ const STATIC_DASHBOARD_HTML = `<!DOCTYPE html>
 </style></head><body>
 <h1>Static Encounter Shiny Hunt</h1>
 <div class="game-view">
-  <img id="gameview" src="/api/frame" alt="Game View" onerror="this.style.opacity=0.3">
+  <img id="gameview" src="/api/stream" alt="Game View" onerror="this.style.opacity=0.3">
   <div class="label">Live Game View</div>
 </div>
 <div class="stats" id="stats"></div>
@@ -500,10 +500,7 @@ async function refresh() {
 }
 refresh();
 setInterval(refresh, 3000);
-setInterval(function() {
-  var img = document.getElementById('gameview');
-  if (img) { img.src = '/api/frame?t=' + Date.now(); img.style.opacity = 1; }
-}, 100);
+// MJPEG stream is continuous — no polling needed
 </script></body></html>`;
 
 const WILD_DASHBOARD_HTML = `<!DOCTYPE html>
@@ -536,7 +533,7 @@ const WILD_DASHBOARD_HTML = `<!DOCTYPE html>
 </style></head><body>
 <h1>Wild Encounter Shiny Hunt — <span id="target" style="color:#ffd700"></span></h1>
 <div class="game-view">
-  <img id="gameview" src="/api/frame" alt="Game View" onerror="this.style.opacity=0.3">
+  <img id="gameview" src="/api/stream" alt="Game View" onerror="this.style.opacity=0.3">
   <div class="label">Live Game View</div>
 </div>
 <div class="stats" id="stats"></div>
@@ -577,11 +574,7 @@ async function refresh() {
 }
 refresh();
 setInterval(refresh, 2000);
-// Auto-refresh game view at ~2fps (enough for monitoring, reduces CPU load)
-setInterval(function() {
-  var img = document.getElementById('gameview');
-  if (img) { img.src = '/api/frame?t=' + Date.now(); img.style.opacity = 1; }
-}, 500);
+// MJPEG stream is continuous — no polling needed
 </script></body></html>`;
 
 const DASHBOARD_HTML = `<!DOCTYPE html>
@@ -626,7 +619,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 </style></head><body>
 <h1>Shiny Hunter - Multi-SID Targeting</h1>
 <div class="game-view">
-  <img id="gameview" src="/api/frame" alt="Game View" onerror="this.style.opacity=0.3">
+  <img id="gameview" src="/api/stream" alt="Game View" onerror="this.style.opacity=0.3">
   <div class="label">Live Game View</div>
 </div>
 <div class="stats" id="stats"></div>
@@ -696,10 +689,7 @@ async function refresh() {
 }
 refresh();
 setInterval(refresh, 5000);
-setInterval(function() {
-  var img = document.getElementById('gameview');
-  if (img) { img.src = '/api/frame?t=' + Date.now(); img.style.opacity = 1; }
-}, 100);
+// MJPEG stream is continuous — no polling needed
 </script></body></html>`;
 
 const SUSPEND_DASHBOARD_HTML = `<!DOCTYPE html>
@@ -727,7 +717,7 @@ const SUSPEND_DASHBOARD_HTML = `<!DOCTYPE html>
 </style></head><body>
 <h1>Suspend-Point RNG Hunt</h1>
 <div class="game-view">
-  <img id="gameview" src="/api/frame" alt="Game View" onerror="this.style.opacity=0.3">
+  <img id="gameview" src="/api/stream" alt="Game View" onerror="this.style.opacity=0.3">
   <div class="label">Live Game View</div>
 </div>
 <div class="stats">
@@ -775,10 +765,7 @@ function refresh() {
 }
 refresh();
 setInterval(refresh, 5000);
-setInterval(function() {
-  var img = document.getElementById('gameview');
-  if (img) { img.src = '/api/frame?t=' + Date.now(); img.style.opacity = 1; }
-}, 100);
+// MJPEG stream is continuous — no polling needed
 </script></body></html>`;
 
 

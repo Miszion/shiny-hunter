@@ -1,6 +1,6 @@
 # Shiny Hunter
 
-Automated shiny hunting for Pokemon FireRed/LeafGreen on real Nintendo Switch hardware (via GBA NSO app). Uses an ESP32-S3 as a USB gamepad emulator, a capture card for frame analysis, and visual detection to identify shiny Pokemon.
+Automated shiny hunting for Pokemon FireRed/LeafGreen on real Nintendo Switch hardware. Uses an ESP32-S3 as a USB gamepad emulator, a capture card for frame analysis, and visual detection to identify shiny Pokemon.
 
 <p align="center">
   <img src="docs/shiny-charmander.png" alt="Shiny Charmander" width="280">
@@ -14,7 +14,7 @@ Automated shiny hunting for Pokemon FireRed/LeafGreen on real Nintendo Switch ha
 
 | Component | Role |
 |-----------|------|
-| **Nintendo Switch** | Runs GBA game via NSO (Game Boy Advance app) |
+| **Nintendo Switch** | Runs FireRed/LeafGreen |
 | **ESP32-S3 DevKitC-1** | Emulates a Pokken Tournament DX Pro Pad (USB HID gamepad) |
 | **USB capture card** (MiraBox) | Captures Switch HDMI output for frame analysis |
 | **Mac** (host) | Runs this Node.js app — sends commands to ESP32, reads frames from capture card |
