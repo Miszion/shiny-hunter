@@ -8,6 +8,7 @@ import { WildHuntEngine } from './engine/wild-hunt';
 import { StaticHuntEngine } from './engine/static-hunt';
 import { StaticRngEngine } from './engine/static-rng';
 import { SuspendRngEngine } from './engine/suspend-rng';
+import { CaptureCardFrames } from './drivers/capture-card-frames';
 import { detectShiny } from './detection/shiny-detector';
 import path from 'path';
 import fs from 'fs/promises';
@@ -44,41 +45,31 @@ export function createServer(engine: IHuntEngine, frameSource?: FrameSource, inp
     });
   }
 
-  // MJPEG live stream -- reads raw JPEG from capture card for smooth viewing
-  if (frameSource) {
-    app.get('/api/stream', async (req, res) => {
+  // MJPEG live stream — event-driven from capture driver's ffmpeg pipe.
+  // Each complete SOI..EOI JPEG frame from ffmpeg's stdout is emitted as a
+  // 'frame' event; we forward it straight to the client as one multipart chunk.
+  // No disk I/O, no partial reads, no polling-vs-write race.
+  if (frameSource instanceof CaptureCardFrames) {
+    const capture = frameSource;
+    app.get('/api/stream', (req, res) => {
       res.setHeader('Content-Type', 'multipart/x-mixed-replace; boundary=frame');
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.setHeader('Connection', 'keep-alive');
       res.setHeader('Access-Control-Allow-Origin', '*');
 
-      let running = true;
-      req.on('close', () => { running = false; });
+      const send = (jpeg: Buffer) => {
+        if (!res.writable) return;
+        res.write(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${jpeg.length}\r\n\r\n`);
+        res.write(jpeg);
+        res.write('\r\n');
+      };
 
-      const fs = await import('fs/promises');
-      const jpegPath = '/tmp/shiny-hunter-live.jpg';
-      let lastMtimeMs = 0;
+      // Push the latest frame immediately so the client sees something right away
+      const initial = capture.getLatestJpeg();
+      if (initial) send(initial);
 
-      while (running) {
-        try {
-          // Only re-serve when ffmpeg has written a new frame (dedupe by mtime)
-          const stat = await fs.stat(jpegPath);
-          if (stat.mtimeMs === lastMtimeMs) {
-            await new Promise(r => setTimeout(r, 15));
-            continue;
-          }
-          lastMtimeMs = stat.mtimeMs;
-          const raw = await fs.readFile(jpegPath);
-          if (raw.length > 500) {
-            res.write(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${raw.length}\r\n\r\n`);
-            res.write(raw);
-            res.write('\r\n');
-          }
-        } catch {
-          // File not ready, skip briefly
-          await new Promise(r => setTimeout(r, 20));
-        }
-      }
+      capture.on('frame', send);
+      req.on('close', () => { capture.off('frame', send); });
     });
   }
 

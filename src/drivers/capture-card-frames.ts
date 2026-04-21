@@ -1,5 +1,6 @@
 import { spawn, ChildProcess, execFile } from 'child_process';
 import { promisify } from 'util';
+import { EventEmitter } from 'events';
 import fs from 'fs/promises';
 import path from 'path';
 import sharp from 'sharp';
@@ -10,15 +11,21 @@ import { logger } from '../logger';
 const execFileAsync = promisify(execFile);
 
 /**
- * Captures frames from a USB capture card using a persistent ffmpeg process.
- * ffmpeg runs continuously at 10fps, writing to a single file with -update 1.
- * captureFrame() reads the latest file (~20ms vs ~1750ms with per-invocation ffmpeg).
+ * Captures frames from a USB capture card via a persistent ffmpeg process piping
+ * MJPEG to stdout. Each SOI..EOI-delimited JPEG frame is parsed out in-memory.
+ *
+ * - `latestJpeg`: most recent complete JPEG buffer — served directly to the
+ *   dashboard MJPEG stream (no disk roundtrip = no partial reads)
+ * - `latestFrame`: downscaled 240x160 PNG used by shiny-detection pipeline
+ * - Emits `frame` event (Buffer) per new complete JPEG so the server can push
+ *   to connected dashboards without polling
  */
-export class CaptureCardFrames implements FrameSource {
+export class CaptureCardFrames extends EventEmitter implements FrameSource {
   private device = '';
-  private tmpPath = '/tmp/shiny-hunter-live.jpg';
+  private tmpPath = '/tmp/shiny-hunter-live.jpg'; // legacy compatibility write
   private ffmpegProcess: ChildProcess | null = null;
-  private latestFrame: Buffer | null = null;
+  private latestFrame: Buffer | null = null;      // processed 240x160 PNG (for detection)
+  private latestJpeg: Buffer | null = null;       // raw JPEG (for dashboard stream)
   private latestFrameTime = 0;
   private running = false;
   private dashboardPollTimer: ReturnType<typeof setInterval> | null = null;
@@ -26,6 +33,12 @@ export class CaptureCardFrames implements FrameSource {
   private lastFrameSize = 0;
   private staleCount = 0;
   public onSignalLost: (() => void) | null = null;
+
+  // MJPEG parser state
+  private mjpegBuf: Buffer = Buffer.alloc(0);
+  private soiPos = -1; // position of most recent start-of-image marker in mjpegBuf
+
+  getLatestJpeg(): Buffer | null { return this.latestJpeg; }
 
   async init(): Promise<void> {
     await this.killOrphanedFfmpeg();
@@ -112,17 +125,22 @@ export class CaptureCardFrames implements FrameSource {
     }
 
     this.running = true;
+    // Single ffmpeg, two outputs: MJPEG piped to stdout (served to dashboard,
+    // never partial because parsing is marker-delimited) AND a file write for
+    // legacy fallback reads. captureFrame() reads the in-memory latest JPEG.
     this.ffmpegProcess = spawn('ffmpeg', [
       '-y',
       '-f', 'avfoundation',
       '-framerate', '30',
       '-video_size', '1920x1080',
       '-i', this.device,
-      '-vf', 'fps=30',
-      '-q:v', '3',
-      '-update', '1',
-      this.tmpPath,
+      // Output 1: MJPEG to stdout (dashboard stream)
+      '-map', '0:v', '-vf', 'fps=30', '-q:v', '3', '-f', 'mjpeg', 'pipe:1',
+      // Output 2: single-image file (legacy compatibility)
+      '-map', '0:v', '-vf', 'fps=15', '-q:v', '3', '-update', '1', this.tmpPath,
     ], { stdio: ['pipe', 'pipe', 'pipe'] });
+
+    this.ffmpegProcess.stdout?.on('data', (chunk: Buffer) => this.ingestMjpeg(chunk));
 
     this.ffmpegProcess.stderr?.on('data', (data: Buffer) => {
       const msg = data.toString();
@@ -139,6 +157,51 @@ export class CaptureCardFrames implements FrameSource {
     });
   }
 
+  /**
+   * Parse a chunk of MJPEG stream bytes from ffmpeg's stdout. Frames are
+   * delimited by SOI (0xFFD8) and EOI (0xFFD9). Each complete frame is
+   * stored as `latestJpeg` and emitted as a `frame` event.
+   */
+  private ingestMjpeg(chunk: Buffer): void {
+    this.mjpegBuf = this.mjpegBuf.length === 0 ? chunk : Buffer.concat([this.mjpegBuf, chunk]);
+    // Cap buffer growth: if we haven't found SOI in 2MB, reset to avoid OOM
+    if (this.mjpegBuf.length > 2 * 1024 * 1024 && this.soiPos < 0) {
+      this.mjpegBuf = Buffer.alloc(0);
+      return;
+    }
+    while (true) {
+      if (this.soiPos < 0) {
+        this.soiPos = this.findMarker(this.mjpegBuf, 0, 0xD8);
+        if (this.soiPos < 0) {
+          // drop everything — no SOI in buffer
+          this.mjpegBuf = Buffer.alloc(0);
+          return;
+        }
+        // drop bytes before SOI
+        if (this.soiPos > 0) {
+          this.mjpegBuf = this.mjpegBuf.subarray(this.soiPos);
+          this.soiPos = 0;
+        }
+      }
+      // Search for EOI after SOI+2
+      const eoi = this.findMarker(this.mjpegBuf, this.soiPos + 2, 0xD9);
+      if (eoi < 0) return; // frame still streaming
+      const frame = this.mjpegBuf.subarray(this.soiPos, eoi + 2);
+      this.latestJpeg = Buffer.from(frame);
+      this.emit('frame', this.latestJpeg);
+      // advance buffer past this frame
+      this.mjpegBuf = this.mjpegBuf.subarray(eoi + 2);
+      this.soiPos = -1;
+    }
+  }
+
+  private findMarker(buf: Buffer, start: number, second: number): number {
+    for (let i = start; i < buf.length - 1; i++) {
+      if (buf[i] === 0xFF && buf[i + 1] === second) return i;
+    }
+    return -1;
+  }
+
   private async waitForFirstFrame(): Promise<void> {
     for (let i = 0; i < 50; i++) {
       try {
@@ -153,7 +216,9 @@ export class CaptureCardFrames implements FrameSource {
   async captureFrame(): Promise<Buffer> {
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const raw = await fs.readFile(this.tmpPath);
+        // Prefer in-memory JPEG (from MJPEG pipe, never partial). Fall back to
+        // disk file only if the pipe hasn't delivered a frame yet.
+        const raw = this.latestJpeg ?? await fs.readFile(this.tmpPath);
         if (raw.length < 500) {
           await new Promise(r => setTimeout(r, 50));
           continue;
