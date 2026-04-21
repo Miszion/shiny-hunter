@@ -9,6 +9,7 @@ import {
   isOverworldScreen,
 } from '../detection/battle-shiny';
 import { extractBattleInfo, BattleEnemyInfo } from '../detection/battle-info';
+import * as delayCalibration from './delay-calibration';
 
 /**
  * Wild encounter shiny hunt engine.
@@ -118,8 +119,7 @@ export class WildHuntEngine extends EventEmitter {
 
   // Baseline timing: rolling average of "battle detected → text appeared" delay
   // for normal encounters. Shiny encounters should be ~0.5-0.7s longer.
-  private textDelayHistory: number[] = [];
-  private static readonly TEXT_DELAY_HISTORY_SIZE = 30;
+  // History is shared with LegendaryHuntEngine via delay-calibration singleton.
 
   // Encounter log for dashboard
   public encounterLog: Array<{
@@ -355,8 +355,8 @@ export class WildHuntEngine extends EventEmitter {
     // ── Signal 1: Timing-based detection ──
     const timingResult = evaluateTimingSignal({
       textDelayMs: (textAppearedAt && textDelayMs > 0) ? textDelayMs : null,
-      avgDelay: this.getAverageTextDelay(),
-      historySize: this.textDelayHistory.length,
+      avgDelay: delayCalibration.getAverage(),
+      historySize: delayCalibration.getHistorySize(),
       elapsedSinceBattle: Date.now() - battleDetectedAt,
     });
     const timingSignal = timingResult.signal;
@@ -381,10 +381,7 @@ export class WildHuntEngine extends EventEmitter {
 
     // Update timing baseline (only for non-shiny encounters with valid timing)
     if (!isShiny && textAppearedAt && textDelayMs > 0 && textDelayMs < 5000) {
-      this.textDelayHistory.push(textDelayMs);
-      if (this.textDelayHistory.length > WildHuntEngine.TEXT_DELAY_HISTORY_SIZE) {
-        this.textDelayHistory.shift();
-      }
+      delayCalibration.addSample(textDelayMs);
     }
 
     // Only screenshot when timing says shiny
@@ -449,11 +446,6 @@ export class WildHuntEngine extends EventEmitter {
     if (this.encounters % 100 === 0) {
       this.emit('milestone', this.getStatus());
     }
-  }
-
-  private getAverageTextDelay(): number {
-    if (this.textDelayHistory.length === 0) return 0;
-    return this.textDelayHistory.reduce((a, b) => a + b, 0) / this.textDelayHistory.length;
   }
 
   /**

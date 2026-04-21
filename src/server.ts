@@ -404,7 +404,7 @@ export function createServer(engine: IHuntEngine, frameSource?: FrameSource, inp
     });
 
     app.get('/dashboard', (_req, res) => {
-      res.send(STATIC_DASHBOARD_HTML);
+      res.send(LEGENDARY_DASHBOARD_HTML);
     });
   }
 
@@ -521,6 +521,100 @@ async function refresh() {
 refresh();
 setInterval(refresh, 3000);
 // MJPEG stream is continuous — no polling needed
+</script></body></html>`;
+
+const LEGENDARY_DASHBOARD_HTML = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Legendary Hunt Dashboard</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, monospace; background: #1a1a2e; color: #e0e0e0; padding: 16px; }
+  h1 { color: #ffd700; font-size: 20px; margin-bottom: 12px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; margin-bottom: 16px; }
+  .stat { background: #16213e; border-radius: 8px; padding: 12px; text-align: center; }
+  .stat .val { font-size: 24px; font-weight: bold; color: #00d4ff; }
+  .stat .label { font-size: 11px; color: #888; margin-top: 4px; }
+  .odds { color: #ffd700; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { background: #16213e; color: #888; padding: 6px 8px; text-align: left; position: sticky; top: 0; }
+  td { padding: 5px 8px; border-bottom: 1px solid #222; }
+  tr:hover { background: #16213e; }
+  .shiny { background: #3d2e00 !important; color: #ffd700; }
+  .log-wrap { max-height: 60vh; overflow-y: auto; }
+  .ago { color: #666; font-size: 10px; }
+  .timing-shiny { color: #ffd700; font-weight: bold; }
+  .timing-slow { color: #ff6b6b; font-weight: bold; }
+  .timing-normal { color: #aaa; }
+  .timing-cal { color: #555; font-style: italic; }
+  .sig-shiny { color: #ffd700; font-weight: bold; }
+  .sig-inconclusive { color: #ffb36b; }
+  .sig-normal { color: #666; }
+  .sig-none { color: #333; }
+  .game-view { text-align: center; margin-bottom: 16px; }
+  .game-view img { width: 720px; height: 480px; image-rendering: pixelated; border: 2px solid #333; border-radius: 8px; background: #000; }
+  .game-view .label { font-size: 11px; color: #666; margin-top: 4px; }
+  .legend { font-size: 11px; color: #888; margin-bottom: 8px; }
+  .legend span { margin-right: 12px; }
+</style></head><body>
+<h1>Legendary Soft-Reset Hunt &mdash; <span id="target" style="color:#ffd700"></span></h1>
+<div class="game-view">
+  <img id="gameview" src="/api/stream" alt="Game View" onerror="this.style.opacity=0.3">
+  <div class="label">Live Game View</div>
+</div>
+<div class="stats" id="stats"></div>
+<div class="legend">
+  <span>Delay = ms from battle-screen render to &ldquo;A wild X appeared!&rdquo; text</span>
+  <span><span class="timing-normal">&#9632;</span> normal</span>
+  <span><span class="timing-slow">&#9632;</span> &gt;2500ms (suspicious)</span>
+  <span><span class="timing-shiny">&#9632;</span> shiny (&gt;3500ms)</span>
+</div>
+<div class="log-wrap"><table><thead><tr>
+  <th>#</th><th>Time</th><th>Delay</th><th>Signal</th><th>Notes</th>
+</tr></thead><tbody id="log"></tbody></table></div>
+<script>
+function ago(ts) {
+  const s = Math.round((Date.now() - ts) / 1000);
+  if (s < 60) return s + 's ago';
+  return Math.floor(s/60) + 'm ago';
+}
+async function refresh() {
+  try {
+    const r = await fetch('/api/static/encounters');
+    const d = await r.json();
+    document.getElementById('target').textContent = d.target ? d.target.toUpperCase() : '';
+    var avgDelay = 0, samples = 0;
+    for (var i = 0; i < d.log.length; i++) {
+      if (d.log[i].textDelayMs && !d.log[i].isShiny) { avgDelay += d.log[i].textDelayMs; samples++; }
+    }
+    avgDelay = samples > 0 ? Math.round(avgDelay / samples) : 0;
+    document.getElementById('stats').innerHTML = [
+      ['val', d.encounters, 'label', 'Resets'],
+      ['val odds', '1/8192', 'label', 'Standard Odds'],
+      ['val', d.rate + '/hr', 'label', 'Rate'],
+      ['val', Math.round(d.elapsed/60) + 'm', 'label', 'Elapsed'],
+      ['val', avgDelay ? avgDelay + 'ms' : '-', 'label', 'Avg Delay'],
+    ].map(function(row) { return '<div class="stat"><div class="'+row[0]+'">'+row[1]+'</div><div class="'+row[2]+'">'+row[3]+'</div></div>'; }).join('');
+
+    document.getElementById('log').innerHTML = d.log.map(function(e) {
+      var cls = e.isShiny ? 'shiny' : '';
+      var shinyBadge = e.isShiny ? ' <span style="color:#ffd700;font-weight:bold">&#10024; SHINY!</span>' : '';
+      var delayClass = 'timing-cal', delayTxt = '-';
+      if (e.textDelayMs) {
+        delayTxt = e.textDelayMs + 'ms';
+        if (e.textDelayMs > 3500) delayClass = 'timing-shiny';
+        else if (e.textDelayMs > 2500) delayClass = 'timing-slow';
+        else delayClass = 'timing-normal';
+      }
+      var sig = e.signal || (e.isShiny ? 'shiny' : '');
+      var sigClass = sig === 'shiny' ? 'sig-shiny' : sig === 'inconclusive' ? 'sig-inconclusive' : sig === 'normal' ? 'sig-normal' : 'sig-none';
+      var sigTxt = sig ? sig : '-';
+      var notes = e.debug ? e.debug.replace(/</g,'&lt;') : '-';
+      return '<tr class="'+cls+'"><td>'+e.attempt+shinyBadge+'</td><td><span class="ago">'+ago(e.time)+'</span></td><td><span class="'+delayClass+'">'+delayTxt+'</span></td><td><span class="'+sigClass+'">'+sigTxt+'</span></td><td style="color:#888;font-size:11px">'+notes+'</td></tr>';
+    }).join('');
+  } catch(e) { console.error(e); }
+}
+refresh();
+setInterval(refresh, 2000);
 </script></body></html>`;
 
 const WILD_DASHBOARD_HTML = `<!DOCTYPE html>

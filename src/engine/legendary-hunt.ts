@@ -44,6 +44,7 @@ import { getStaticSequences } from './sequences';
 import { isBattleScreen, detectBattleSparkle } from '../detection/battle-shiny';
 import { extractBattleInfo } from '../detection/battle-info';
 import { evaluateTimingSignal } from './wild-hunt';
+import * as delayCalibration from './delay-calibration';
 
 type LegendaryState =
   | 'IDLE'
@@ -78,23 +79,12 @@ export class LegendaryHuntEngine extends EventEmitter {
     isShiny: boolean;
     debug: string;
     textDelayMs?: number;
+    signal?: 'shiny' | 'normal' | 'inconclusive';
   }> = [];
 
-  // Rolling average of text-appearance delay, used to detect shiny via
-  // delay-based signal (same approach wild-hunt uses).
-  private textDelayHistory: number[] = [];
-  private readonly HISTORY_MAX = 30;
-
-  private getAverageTextDelay(): number {
-    if (this.textDelayHistory.length === 0) return 0;
-    const sum = this.textDelayHistory.reduce((a, b) => a + b, 0);
-    return sum / this.textDelayHistory.length;
-  }
-
-  private addTextDelaySample(ms: number): void {
-    this.textDelayHistory.push(ms);
-    if (this.textDelayHistory.length > this.HISTORY_MAX) this.textDelayHistory.shift();
-  }
+  // Text-appearance delay calibration is shared with WildHuntEngine via the
+  // delay-calibration singleton. Legendary hunts reuse whatever baseline wild
+  // hunting already accumulated — no cold-start re-calibration needed.
 
   constructor(frameSource: FrameSource, input: InputController) {
     super();
@@ -279,11 +269,11 @@ export class LegendaryHuntEngine extends EventEmitter {
       await this.wait(200);
     }
 
-    // Step 3: evaluate timing signal
+    // Step 3: evaluate timing signal using shared wild/legendary calibration
     const timingResult = evaluateTimingSignal({
       textDelayMs: (textAppearedAt && textDelayMs > 0) ? textDelayMs : null,
-      avgDelay: this.getAverageTextDelay(),
-      historySize: this.textDelayHistory.length,
+      avgDelay: delayCalibration.getAverage(),
+      historySize: delayCalibration.getHistorySize(),
       elapsedSinceBattle: Date.now() - battleDetectedAt,
     });
 
@@ -305,6 +295,7 @@ export class LegendaryHuntEngine extends EventEmitter {
       this.encounterLog.push({
         attempt: this.attempts, time: Date.now(), isShiny: true,
         debug, textDelayMs: textDelayMs || undefined,
+        signal: timingResult.signal,
       });
       this.emit('shiny', {
         pokemon: this.target,
@@ -318,16 +309,17 @@ export class LegendaryHuntEngine extends EventEmitter {
       return;
     }
 
-    // Non-shiny — update rolling delay average (only for normal/inconclusive
+    // Non-shiny — update shared rolling delay average (only for normal/inconclusive
     // where we got a clean text-delay reading under 5s)
     if (textDelayMs > 0 && textDelayMs < 5000) {
-      this.addTextDelaySample(textDelayMs);
+      delayCalibration.addSample(textDelayMs);
     }
 
     logger.info(`[Legendary] Encounter #${this.attempts}: ${timingResult.signal} | ${this.target} | ${debug}`);
     this.encounterLog.push({
       attempt: this.attempts, time: Date.now(), isShiny: false,
       debug, textDelayMs: textDelayMs || undefined,
+      signal: timingResult.signal,
     });
     if (lastFrame && this.attempts % 100 === 1) {
       try {
