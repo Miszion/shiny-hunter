@@ -10,6 +10,7 @@ import { StaticRngEngine } from './engine/static-rng';
 import { SuspendRngEngine } from './engine/suspend-rng';
 import { LegendaryHuntEngine } from './engine/legendary-hunt';
 import { CaptureCardFrames } from './drivers/capture-card-frames';
+import { SwitchInput } from './drivers/switch-input';
 import { detectShiny } from './detection/shiny-detector';
 import path from 'path';
 import fs from 'fs/promises';
@@ -132,11 +133,32 @@ export function createServer(engine: IHuntEngine, frameSource?: FrameSource, inp
     });
   }
 
-  // Current hunt status
+  // Current hunt status — includes watchdog/recovery counters so the dashboard
+  // can distinguish a healthy hunt from a zombie loop (process alive per PM2
+  // but no real encounters flowing). See legendary-hunt.ts + switch-input.ts
+  // + capture-card-frames.ts for where these counters get incremented.
   app.get('/api/status', (_req, res) => {
     const status = engine.getStatus();
     const stats = getHuntStats();
-    res.json({ ...status, lifetime: stats });
+    const esp32_timeout_count =
+      inputController && inputController instanceof SwitchInput
+        ? inputController.getEsp32TimeoutCount()
+        : 0;
+    const capture_blackout_count =
+      frameSource && frameSource instanceof CaptureCardFrames
+        ? frameSource.getCaptureBlackoutCount()
+        : 0;
+    const stuck_state_count =
+      engine instanceof LegendaryHuntEngine ? engine.getStuckStateCount() : 0;
+    res.json({
+      ...status,
+      lifetime: stats,
+      watchdog: {
+        esp32_timeout_count,
+        capture_blackout_count,
+        stuck_state_count,
+      },
+    });
   });
 
   // Hunt history
