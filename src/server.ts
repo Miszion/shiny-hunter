@@ -191,6 +191,10 @@ export function createServer(engine: IHuntEngine, frameSource?: FrameSource, inp
       inputController && inputController instanceof SwitchInput
         ? inputController.getEsp32TimeoutCount()
         : 0;
+    const serial_port_reopens =
+      inputController && inputController instanceof SwitchInput
+        ? inputController.getSerialPortReopenCount()
+        : 0;
     const capture_blackout_count =
       frameSource && frameSource instanceof CaptureCardFrames
         ? frameSource.getCaptureBlackoutCount()
@@ -202,6 +206,7 @@ export function createServer(engine: IHuntEngine, frameSource?: FrameSource, inp
       lifetime: stats,
       watchdog: {
         esp32_timeout_count,
+        serial_port_reopens,
         capture_blackout_count,
         stuck_state_count,
         capture_frames_dropped_backpressure: captureFramesDroppedBackpressure,

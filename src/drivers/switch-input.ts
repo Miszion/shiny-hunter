@@ -34,12 +34,24 @@ const BUTTON_MAP: Record<GBAButton, string> = {
   R: 'R',
 };
 
-// After this many consecutive command timeouts we close the serial port,
-// reopen it, and retry the failing command once. If the retry also times
-// out we exit(1) so PM2 restarts the process cleanly — a wedged ESP32
-// will otherwise silently stall the hunt (seen 2026-04-22 10:32-10:37
-// CDT: 58 RESET timeouts in a row, zero auto-recovery).
+// After this many consecutive serial faults (command timeouts OR closed-port
+// errors) we close the serial port, reopen it, and retry the failing command
+// once. If the retry also fails we exit(1) so PM2 restarts the process
+// cleanly — a wedged ESP32 will otherwise silently stall the hunt (seen
+// 2026-04-22 10:32-10:37 CDT: 58 RESET timeouts in a row; and 2026-04-23
+// 15:26 CDT: 58 min stall with "not open" errors bypassing the watchdog).
 const ESP32_TIMEOUTS_BEFORE_REOPEN = 3;
+
+// Errors from sendCommandRaw that indicate the serial link is faulty and
+// should feed the reopen/retry/exit ladder. Closed-port and mid-reopen
+// races are additive to the original "timed out" condition.
+function isSerialFaultError(msg: string): boolean {
+  return (
+    msg.includes('timed out') ||
+    msg.includes('not open') ||
+    msg.includes('Serial port reopening')
+  );
+}
 
 export class SwitchInput implements InputController {
   private port: SerialPort | null = null;
@@ -51,15 +63,26 @@ export class SwitchInput implements InputController {
   }> = [];
   private hidReady = false;
 
-  // Watchdog state — consecutive command timeouts since last successful response.
-  // Resets to 0 on any successful response. Exposed via getEsp32TimeoutCount()
-  // for /api/status telemetry.
+  // Watchdog state — consecutive serial faults (command timeouts OR closed-port
+  // errors) since last successful response. Resets to 0 on any successful
+  // response. Exposed via getEsp32TimeoutCount() for /api/status telemetry;
+  // name kept for backwards compatibility even though it now covers all
+  // serial faults, not just timeouts.
   private consecutiveTimeouts = 0;
   private totalTimeouts = 0;
   private reopenInProgress = false;
 
+  // Lifetime count of successful port reopens during this process, surfaced
+  // via /api/status as serial_port_reopens so the dashboard can see when
+  // auto-recovery fires without grepping logs.
+  private totalReopens = 0;
+
   getEsp32TimeoutCount(): number {
     return this.totalTimeouts;
+  }
+
+  getSerialPortReopenCount(): number {
+    return this.totalReopens;
   }
 
   async init(): Promise<void> {
@@ -137,6 +160,42 @@ export class SwitchInput implements InputController {
         }
       });
     });
+
+    this.attachCloseListener();
+  }
+
+  // Wire a 'close' event listener on this.port so an OS-level tty close
+  // (USB hiccup, ESP32 reboot, macOS serial driver flap) does not silently
+  // strand us with isOpen=false forever. Gated by reopenInProgress so our
+  // own explicit close inside reopenPort() does not cause a reopen storm
+  // or stampede concurrent sendCommand callers. Extracted from openPort()
+  // so tests can drive it against a fake port without real serial.
+  private attachCloseListener(): void {
+    if (!this.port) return;
+    this.port.on('close', () => {
+      if (this.reopenInProgress) {
+        logger.debug('[ESP32] Serial port close event (reopen in progress — expected)');
+        return;
+      }
+      // Claim the reopen lock synchronously so concurrent sendCommand
+      // callers back off instead of racing us.
+      this.reopenInProgress = true;
+      logger.warn('[ESP32] Unsolicited serial port close — scheduling proactive reopen');
+      setImmediate(async () => {
+        try {
+          await this.reopenPort();
+          logger.info('[ESP32] Proactive reopen after unsolicited close succeeded');
+        } catch (err) {
+          const m = err instanceof Error ? err.message : String(err);
+          logger.error(
+            `[ESP32] Proactive reopen after unsolicited close failed: ${m} — exiting for PM2 restart`,
+          );
+          process.exit(1);
+        } finally {
+          this.reopenInProgress = false;
+        }
+      });
+    });
   }
 
   // Issue a single command with a timeout. Does not trigger any recovery on
@@ -164,17 +223,20 @@ export class SwitchInput implements InputController {
   // Flow:
   //   1. Try the command.
   //   2. On success: reset counter, return.
-  //   3. On timeout: increment counter.
+  //   3. On serial fault (timeout OR closed-port / reopening race): increment
+  //      counter.
   //      - If counter < threshold, rethrow and let the caller handle it.
   //      - If counter >= threshold, reopen the port and retry ONCE.
   //        If the retry also fails, process.exit(1) for PM2 to restart.
+  // The "not open" branch was previously unfiltered — it bypassed the
+  // watchdog entirely and caused a 58-min silent stall on 2026-04-23.
   private async sendCommand(cmd: string, timeoutMs = 3000): Promise<string> {
     try {
       const out = await this.sendCommandRaw(cmd, timeoutMs);
       return out;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (!msg.includes('timed out')) throw err;
+      if (!isSerialFaultError(msg)) throw err;
 
       this.consecutiveTimeouts++;
       this.totalTimeouts++;
@@ -189,7 +251,7 @@ export class SwitchInput implements InputController {
       }
 
       logger.warn(
-        `[ESP32] ${this.consecutiveTimeouts} consecutive timeouts — reopening serial port and retrying "${cmd}" once`,
+        `[ESP32] ${this.consecutiveTimeouts} consecutive serial faults (${msg}) — reopening serial port and retrying "${cmd}" once`,
       );
       this.reopenInProgress = true;
       try {
@@ -243,6 +305,7 @@ export class SwitchInput implements InputController {
     await this.wait(250);
     await this.openPort(serialPath);
     await this.wait(500);
+    this.totalReopens++;
   }
 
   async pressButton(button: GBAButton, holdMs = 100): Promise<void> {
