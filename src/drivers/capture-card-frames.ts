@@ -20,6 +20,16 @@ const execFileAsync = promisify(execFile);
  * - Emits `frame` event (Buffer) per new complete JPEG so the server can push
  *   to connected dashboards without polling
  */
+// If ffmpeg stops producing new JPEG frames for this long, we treat the
+// capture pipeline as blacked-out and attempt a full reinit of the ffmpeg
+// child process. Two consecutive reinit failures → process.exit(1) for
+// PM2 restart. The existing onSignalLost callback (capture card physically
+// disconnected) keeps its state-preserving graceful path — this watchdog is
+// strictly about a stuck/zombied ffmpeg child.
+const CAPTURE_BLACKOUT_MS = 30_000;
+const CAPTURE_WATCHDOG_INTERVAL_MS = 5_000;
+const CAPTURE_MAX_REINIT_FAILURES = 2;
+
 export class CaptureCardFrames extends EventEmitter implements FrameSource {
   private device = '';
   private tmpPath = '/tmp/shiny-hunter-live.jpg'; // legacy compatibility write
@@ -27,12 +37,23 @@ export class CaptureCardFrames extends EventEmitter implements FrameSource {
   private latestFrame: Buffer | null = null;      // processed 240x160 PNG (for detection)
   private latestJpeg: Buffer | null = null;       // raw JPEG (for dashboard stream)
   private latestFrameTime = 0;
+  private lastMjpegFrameTime = 0;                 // wall-clock of most recent JPEG on the MJPEG pipe
   private running = false;
   private dashboardPollTimer: ReturnType<typeof setInterval> | null = null;
   private signalLostTimer: ReturnType<typeof setInterval> | null = null;
+  private blackoutWatchdog: ReturnType<typeof setInterval> | null = null;
   private lastFrameSize = 0;
   private staleCount = 0;
   public onSignalLost: (() => void) | null = null;
+
+  // Watchdog metrics surfaced via /api/status.
+  private captureBlackoutCount = 0;
+  private consecutiveReinitFailures = 0;
+  private reinitInProgress = false;
+
+  getCaptureBlackoutCount(): number {
+    return this.captureBlackoutCount;
+  }
 
   // MJPEG parser state
   private mjpegBuf: Buffer = Buffer.alloc(0);
@@ -100,6 +121,66 @@ export class CaptureCardFrames extends EventEmitter implements FrameSource {
         }
       } catch {}
     }, 2000);
+
+    // Blackout watchdog — fires when the MJPEG pipe has produced no frames
+    // for >30s. Distinct from the file-stat signal-lost check: that one trips
+    // when the capture hardware loses input (Switch undocked). This one trips
+    // when ffmpeg itself is stuck / zombied and no frames are flowing to
+    // either the pipe or the disk write.
+    this.blackoutWatchdog = setInterval(() => {
+      if (!this.running) return;
+      if (this.lastMjpegFrameTime === 0) return; // haven't seen a frame yet — init waits handle this
+      const age = Date.now() - this.lastMjpegFrameTime;
+      if (age < CAPTURE_BLACKOUT_MS) return;
+      if (this.reinitInProgress) return;
+      this.reinitInProgress = true;
+      this.captureBlackoutCount++;
+      logger.warn(`[Capture] Blackout: no MJPEG frames for ${Math.round(age / 1000)}s — reinitializing ffmpeg`);
+      this.reinitFfmpeg()
+        .then(() => {
+          this.reinitInProgress = false;
+          this.consecutiveReinitFailures = 0;
+          logger.info('[Capture] ffmpeg reinit successful');
+        })
+        .catch((err) => {
+          this.reinitInProgress = false;
+          this.consecutiveReinitFailures++;
+          const msg = err instanceof Error ? err.message : String(err);
+          logger.error(`[Capture] ffmpeg reinit failed (${this.consecutiveReinitFailures}/${CAPTURE_MAX_REINIT_FAILURES}): ${msg}`);
+          if (this.consecutiveReinitFailures >= CAPTURE_MAX_REINIT_FAILURES) {
+            logger.error('[Capture] Max reinit failures reached — exiting for PM2 restart');
+            process.exit(1);
+          }
+        });
+    }, CAPTURE_WATCHDOG_INTERVAL_MS);
+  }
+
+  private async reinitFfmpeg(): Promise<void> {
+    // Kill current ffmpeg, wait for the child to exit, then respawn. The
+    // existing startContinuousCapture() already handles an in-flight process
+    // by killing it, but we go one step further and wait for the exit event
+    // so the OS has released the capture device handle.
+    if (this.ffmpegProcess) {
+      const proc = this.ffmpegProcess;
+      this.ffmpegProcess = null; // prevent the 'exit' listener from auto-respawning
+      try {
+        proc.kill('SIGKILL');
+      } catch { /* already dead */ }
+      await new Promise<void>((resolve) => {
+        if (proc.exitCode !== null) return resolve();
+        proc.once('exit', () => resolve());
+        // Safety net: don't wait forever if the process is already gone.
+        setTimeout(() => resolve(), 2000);
+      });
+    }
+
+    // Reset MJPEG parser state so we don't try to continue a half-frame.
+    this.mjpegBuf = Buffer.alloc(0);
+    this.soiPos = -1;
+    await new Promise((r) => setTimeout(r, 500));
+
+    await this.startContinuousCapture();
+    await this.waitForFirstFrame();
   }
 
   private async killOrphanedFfmpeg(): Promise<void> {
@@ -188,6 +269,7 @@ export class CaptureCardFrames extends EventEmitter implements FrameSource {
       if (eoi < 0) return; // frame still streaming
       const frame = this.mjpegBuf.subarray(this.soiPos, eoi + 2);
       this.latestJpeg = Buffer.from(frame);
+      this.lastMjpegFrameTime = Date.now();
       this.emit('frame', this.latestJpeg);
       // advance buffer past this frame
       this.mjpegBuf = this.mjpegBuf.subarray(eoi + 2);
@@ -295,6 +377,10 @@ export class CaptureCardFrames extends EventEmitter implements FrameSource {
     if (this.signalLostTimer) {
       clearInterval(this.signalLostTimer);
       this.signalLostTimer = null;
+    }
+    if (this.blackoutWatchdog) {
+      clearInterval(this.blackoutWatchdog);
+      this.blackoutWatchdog = null;
     }
     if (this.ffmpegProcess) {
       this.ffmpegProcess.kill('SIGTERM');
