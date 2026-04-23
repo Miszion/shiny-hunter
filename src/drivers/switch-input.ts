@@ -34,6 +34,13 @@ const BUTTON_MAP: Record<GBAButton, string> = {
   R: 'R',
 };
 
+// After this many consecutive command timeouts we close the serial port,
+// reopen it, and retry the failing command once. If the retry also times
+// out we exit(1) so PM2 restarts the process cleanly — a wedged ESP32
+// will otherwise silently stall the hunt (seen 2026-04-22 10:32-10:37
+// CDT: 58 RESET timeouts in a row, zero auto-recovery).
+const ESP32_TIMEOUTS_BEFORE_REOPEN = 3;
+
 export class SwitchInput implements InputController {
   private port: SerialPort | null = null;
   private parser: ReadlineParser | null = null;
@@ -44,12 +51,40 @@ export class SwitchInput implements InputController {
   }> = [];
   private hidReady = false;
 
+  // Watchdog state — consecutive command timeouts since last successful response.
+  // Resets to 0 on any successful response. Exposed via getEsp32TimeoutCount()
+  // for /api/status telemetry.
+  private consecutiveTimeouts = 0;
+  private totalTimeouts = 0;
+  private reopenInProgress = false;
+
+  getEsp32TimeoutCount(): number {
+    return this.totalTimeouts;
+  }
+
   async init(): Promise<void> {
     const serialPath = config.switch.serialPort;
     if (!serialPath) {
       throw new Error('SWITCH_SERIAL_PORT not set. Set it to the ESP32 COM port path (e.g. /dev/cu.usbmodem...)');
     }
+    await this.openPort(serialPath);
 
+    // Wait for ESP32 to be ready
+    await this.wait(500);
+
+    // Verify connection
+    const pong = await this.sendCommandRaw('PING');
+    if (pong !== 'PONG') {
+      throw new Error(`ESP32 PING failed, got: ${pong}`);
+    }
+
+    // Check HID status
+    const status = await this.sendCommandRaw('STATUS');
+    this.hidReady = status.includes('true');
+    logger.info(`Switch controller initialized (HID ready: ${this.hidReady})`);
+  }
+
+  private async openPort(serialPath: string): Promise<void> {
     logger.info(`Opening serial port: ${serialPath} @ ${config.switch.serialBaud} baud`);
 
     this.port = new SerialPort({
@@ -80,6 +115,9 @@ export class SwitchInput implements InputController {
       const pending = this.responseQueue.shift();
       if (pending) {
         clearTimeout(pending.timeout);
+        // Any well-formed response (even ERR) proves the serial link is alive,
+        // so reset the consecutive-timeout watchdog counter.
+        this.consecutiveTimeouts = 0;
         if (trimmed.startsWith('ERR')) {
           pending.reject(new Error(`ESP32: ${trimmed}`));
         } else {
@@ -99,23 +137,12 @@ export class SwitchInput implements InputController {
         }
       });
     });
-
-    // Wait for ESP32 to be ready
-    await this.wait(500);
-
-    // Verify connection
-    const pong = await this.sendCommand('PING');
-    if (pong !== 'PONG') {
-      throw new Error(`ESP32 PING failed, got: ${pong}`);
-    }
-
-    // Check HID status
-    const status = await this.sendCommand('STATUS');
-    this.hidReady = status.includes('true');
-    logger.info(`Switch controller initialized (HID ready: ${this.hidReady})`);
   }
 
-  private sendCommand(cmd: string, timeoutMs = 3000): Promise<string> {
+  // Issue a single command with a timeout. Does not trigger any recovery on
+  // timeout — used during init() (before the watchdog is meaningful) and as
+  // the primitive beneath sendCommand().
+  private sendCommandRaw(cmd: string, timeoutMs = 3000): Promise<string> {
     return new Promise((resolve, reject) => {
       if (!this.port || !this.port.isOpen) {
         reject(new Error('Serial port not open'));
@@ -131,6 +158,91 @@ export class SwitchInput implements InputController {
       this.responseQueue.push({ resolve, reject, timeout });
       this.port.write(cmd + '\n');
     });
+  }
+
+  // Issue a command with watchdog-backed auto-recovery.
+  // Flow:
+  //   1. Try the command.
+  //   2. On success: reset counter, return.
+  //   3. On timeout: increment counter.
+  //      - If counter < threshold, rethrow and let the caller handle it.
+  //      - If counter >= threshold, reopen the port and retry ONCE.
+  //        If the retry also fails, process.exit(1) for PM2 to restart.
+  private async sendCommand(cmd: string, timeoutMs = 3000): Promise<string> {
+    try {
+      const out = await this.sendCommandRaw(cmd, timeoutMs);
+      return out;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!msg.includes('timed out')) throw err;
+
+      this.consecutiveTimeouts++;
+      this.totalTimeouts++;
+
+      if (this.consecutiveTimeouts < ESP32_TIMEOUTS_BEFORE_REOPEN) {
+        throw err;
+      }
+
+      if (this.reopenInProgress) {
+        // Another caller is already reopening — fail fast.
+        throw err;
+      }
+
+      logger.warn(
+        `[ESP32] ${this.consecutiveTimeouts} consecutive timeouts — reopening serial port and retrying "${cmd}" once`,
+      );
+      this.reopenInProgress = true;
+      try {
+        await this.reopenPort();
+      } catch (reopenErr) {
+        this.reopenInProgress = false;
+        const rmsg = reopenErr instanceof Error ? reopenErr.message : String(reopenErr);
+        logger.error(`[ESP32] Reopen failed: ${rmsg} — exiting so PM2 restarts us`);
+        process.exit(1);
+      }
+      this.reopenInProgress = false;
+
+      // One retry after a successful reopen. If that also times out, exit so
+      // PM2 can restart the whole process cleanly.
+      try {
+        const out = await this.sendCommandRaw(cmd, timeoutMs);
+        this.consecutiveTimeouts = 0;
+        logger.info(`[ESP32] Recovered after reopen — "${cmd}" succeeded on retry`);
+        return out;
+      } catch (retryErr) {
+        const rmsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+        logger.error(`[ESP32] Retry after reopen failed: ${rmsg} — exiting for PM2 restart`);
+        process.exit(1);
+      }
+    }
+  }
+
+  private async reopenPort(): Promise<void> {
+    const serialPath = config.switch.serialPort;
+
+    // Drain pending responses before closing — they will never land.
+    for (const pending of this.responseQueue) {
+      clearTimeout(pending.timeout);
+      pending.reject(new Error('Serial port reopening'));
+    }
+    this.responseQueue = [];
+
+    if (this.port) {
+      try {
+        if (this.port.isOpen) {
+          await new Promise<void>((resolve) => {
+            this.port!.close(() => resolve());
+          });
+        }
+      } catch { /* ignore close errors */ }
+      this.port = null;
+      this.parser = null;
+    }
+
+    // Brief pause so the OS releases the tty handle before we grab it again.
+    await this.wait(250);
+    await this.openPort(serialPath);
+    await this.wait(500);
   }
 
   async pressButton(button: GBAButton, holdMs = 100): Promise<void> {
