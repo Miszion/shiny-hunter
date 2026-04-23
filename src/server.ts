@@ -19,6 +19,15 @@ export function createServer(engine: IHuntEngine, frameSource?: FrameSource, inp
   const app = express();
   app.use(express.json());
 
+  // /api/stream backpressure metrics. Counter increments every time a live JPEG
+  // frame is dropped because the previous write hasn't drained yet — dropping
+  // is correct for live video and, critically, keeps ingestMjpeg's synchronous
+  // emit() from blocking ffmpeg's stdout pipe (which previously stalled the
+  // entire capture pipeline when a dashboard tab sat idle).
+  const MAX_STREAM_VIEWERS = 4;
+  let activeStreamViewers = 0;
+  let captureFramesDroppedBackpressure = 0;
+
   // Live frame endpoint — serves the latest cached frame as PNG.
   // NEVER captures a fresh frame here to avoid racing with the hunt engine
   // for the capture device (causes webcam swap when two ffmpeg hit it).
@@ -54,24 +63,62 @@ export function createServer(engine: IHuntEngine, frameSource?: FrameSource, inp
   if (frameSource instanceof CaptureCardFrames) {
     const capture = frameSource;
     app.get('/api/stream', (req, res) => {
+      if (activeStreamViewers >= MAX_STREAM_VIEWERS) {
+        res.status(503).json({ error: 'Too many concurrent stream viewers' });
+        return;
+      }
+      activeStreamViewers++;
+
       res.setHeader('Content-Type', 'multipart/x-mixed-replace; boundary=frame');
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.setHeader('Connection', 'keep-alive');
       res.setHeader('Access-Control-Allow-Origin', '*');
 
+      // Live video: no Nagle batching, and keep-alive probes so a half-open
+      // socket (client process killed without FIN) eventually surfaces as a
+      // 'close' event instead of hanging a viewer slot forever.
+      try {
+        res.socket?.setNoDelay(true);
+        res.socket?.setKeepAlive(true);
+      } catch {}
+
+      let sending = false;
+      let closed = false;
+
       const send = (jpeg: Buffer) => {
-        if (!res.writable) return;
-        res.write(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${jpeg.length}\r\n\r\n`);
-        res.write(jpeg);
-        res.write('\r\n');
+        if (closed || !res.writable) return;
+        if (sending) {
+          // Previous write hasn't drained — drop this frame rather than buffer
+          // it. Queueing would grow Node's write buffer unboundedly and, via
+          // the synchronous emit inside ingestMjpeg, back up ffmpeg's stdout
+          // pipe until the capture pipeline stalls.
+          captureFramesDroppedBackpressure++;
+          return;
+        }
+        sending = true;
+        const ok =
+          res.write(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${jpeg.length}\r\n\r\n`) &&
+          res.write(jpeg) &&
+          res.write('\r\n');
+        if (ok) {
+          sending = false;
+        } else {
+          res.once('drain', () => { sending = false; });
+        }
       };
 
-      // Push the latest frame immediately so the client sees something right away
       const initial = capture.getLatestJpeg();
       if (initial) send(initial);
 
       capture.on('frame', send);
-      req.on('close', () => { capture.off('frame', send); });
+      const cleanup = () => {
+        if (closed) return;
+        closed = true;
+        capture.off('frame', send);
+        activeStreamViewers = Math.max(0, activeStreamViewers - 1);
+      };
+      req.on('close', cleanup);
+      res.on('close', cleanup);
     });
   }
 
@@ -157,6 +204,8 @@ export function createServer(engine: IHuntEngine, frameSource?: FrameSource, inp
         esp32_timeout_count,
         capture_blackout_count,
         stuck_state_count,
+        capture_frames_dropped_backpressure: captureFramesDroppedBackpressure,
+        active_stream_viewers: activeStreamViewers,
       },
     });
   });
