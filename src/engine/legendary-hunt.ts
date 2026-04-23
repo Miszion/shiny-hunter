@@ -63,6 +63,13 @@ const SPARKLE_SCAN_MS = 2500;
 const SPARKLE_POLL_INTERVAL_MS = 150;
 const BATTLE_DETECT_TIMEOUT_MS = 15_000;
 
+// If the state machine hasn't transitioned in this long, we're wedged.
+// Force back to SOFT_RESET so the hunt keeps making progress. Covers the
+// "battle screen never appeared" family of bugs where tick() is looping
+// but no real encounter is being produced.
+const STUCK_STATE_TIMEOUT_MS = 60_000;
+const STUCK_STATE_CHECK_INTERVAL_MS = 5_000;
+
 export class LegendaryHuntEngine extends EventEmitter {
   private state: LegendaryState = 'IDLE';
   private attempts = 0;
@@ -72,6 +79,17 @@ export class LegendaryHuntEngine extends EventEmitter {
   private input: InputController;
   private target: string;
   private game: string;
+
+  // Stuck-state detection: if `state` hasn't changed in STUCK_STATE_TIMEOUT_MS,
+  // the supervisor forces a reset. Tracks the wall-clock of the last transition
+  // and a lifetime count (surfaced via /api/status).
+  private lastStateChangeAt = 0;
+  private stuckStateCount = 0;
+  private stuckStateWatchdog: ReturnType<typeof setInterval> | null = null;
+
+  getStuckStateCount(): number {
+    return this.stuckStateCount;
+  }
 
   public encounterLog: Array<{
     attempt: number;
@@ -116,15 +134,31 @@ export class LegendaryHuntEngine extends EventEmitter {
     this.running = true;
     this.attempts = 0;
     this.startedAt = Date.now();
-    this.state = 'SOFT_RESET';
+    this.transition('SOFT_RESET');
     this.emit('started', this.getStatus());
+
+    // Stuck-state watchdog: runs independently of the main tick loop so it
+    // can fire even if tick() is blocked inside a long await (e.g. an ESP32
+    // RESET call that eventually times out after 5s — within a single tick
+    // you could easily burn 60s doing nothing productive).
+    this.stuckStateWatchdog = setInterval(() => {
+      if (!this.running) return;
+      const age = Date.now() - this.lastStateChangeAt;
+      if (age < STUCK_STATE_TIMEOUT_MS) return;
+      this.stuckStateCount++;
+      logger.warn(
+        `[Legendary] Stuck in state ${this.state} for ${Math.round(age / 1000)}s — forcing SOFT_RESET (total stuck count: ${this.stuckStateCount})`,
+      );
+      this.transition('SOFT_RESET');
+    }, STUCK_STATE_CHECK_INTERVAL_MS);
+
     while (this.running) {
       try {
         await this.tick();
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         logger.error(`[Legendary] Error in state ${this.state}: ${msg}`);
-        this.state = 'SOFT_RESET';
+        this.transition('SOFT_RESET');
         await this.wait(1000);
       }
     }
@@ -133,19 +167,32 @@ export class LegendaryHuntEngine extends EventEmitter {
   stop(): void {
     logger.info(`[Legendary] Stopping after ${this.attempts} attempts`);
     this.running = false;
-    this.state = 'IDLE';
+    if (this.stuckStateWatchdog) {
+      clearInterval(this.stuckStateWatchdog);
+      this.stuckStateWatchdog = null;
+    }
+    this.transition('IDLE');
     this.emit('stopped', this.getStatus());
+  }
+
+  // Centralized state transition so the stuck-state watchdog always sees an
+  // accurate "last time state changed" timestamp, including when the same
+  // state is re-entered (we still bump the clock to avoid a same-state
+  // watchdog-storm loop).
+  private transition(next: LegendaryState): void {
+    this.state = next;
+    this.lastStateChangeAt = Date.now();
   }
 
   private async tick(): Promise<void> {
     switch (this.state) {
       case 'SOFT_RESET':
         await this.input.softReset();
-        this.state = 'WAIT_BOOT';
+        this.transition('WAIT_BOOT');
         break;
       case 'WAIT_BOOT':
         await this.wait(config.env === 'switch' ? 2500 : 3000);
-        this.state = 'TITLE_AND_LOAD';
+        this.transition('TITLE_AND_LOAD');
         break;
       case 'TITLE_AND_LOAD':
         await this.titleAndLoad();
@@ -161,7 +208,7 @@ export class LegendaryHuntEngine extends EventEmitter {
         this.stop();
         break;
       case 'RESET':
-        this.state = 'SOFT_RESET';
+        this.transition('SOFT_RESET');
         break;
       case 'IDLE':
         await this.wait(100);
@@ -179,13 +226,13 @@ export class LegendaryHuntEngine extends EventEmitter {
       await this.wait(150);
     }
     await this.wait(400);
-    this.state = 'ENGAGE';
+    this.transition('ENGAGE');
   }
 
   private async engage(): Promise<void> {
     const seqs = getStaticSequences(this.game, this.target);
     await this.executeSequence(seqs.interact);
-    this.state = 'DETECT';
+    this.transition('DETECT');
   }
 
   /**
@@ -224,7 +271,7 @@ export class LegendaryHuntEngine extends EventEmitter {
         attempt: this.attempts, time: Date.now(), isShiny: false,
         debug: 'battle-screen-timeout',
       });
-      this.state = 'RESET';
+      this.transition('RESET');
       return;
     }
 
@@ -305,7 +352,7 @@ export class LegendaryHuntEngine extends EventEmitter {
         debug,
         textDelayMs: textDelayMs || undefined,
       });
-      this.state = 'SHINY_FOUND';
+      this.transition('SHINY_FOUND');
       return;
     }
 
@@ -329,7 +376,7 @@ export class LegendaryHuntEngine extends EventEmitter {
       } catch {}
     }
     if (this.attempts % 100 === 0) this.emit('milestone', this.getStatus());
-    this.state = 'RESET';
+    this.transition('RESET');
   }
 
   private async executeSequence(sequence: ButtonSequence): Promise<void> {
