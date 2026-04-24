@@ -50,12 +50,14 @@ export function evaluateTimingSignal(opts: {
 
   if (textDelayMs !== null && textDelayMs > 0) {
     // Calibration reference (8832 non-shiny wild encounters): avg=2043ms,
-    // p50=2036, max=2429. Shiny catches (Voltorb/Pikachu): 3800ms+ or no-text
-    // at ~5s. There is a clean gap between ~2500 and ~3500 — no encounter
-    // ever landed there, so we binary-classify on a single 3000ms split.
-    //   delay > 3000ms  → SHINY  (worst-case normal was 2429)
-    //   delay ≤ 3000ms  → NORMAL
-    if (textDelayMs > 3000) {
+    // p50=2036, max=2429. Mewtwo top non-shiny: 2878ms (#2490). Real shiny
+    // catches (Voltorb 3402ms, Pikachu 3809ms) sit well above. Cutoff lowered
+    // from 3000ms -> 2800ms per user 2026-04-24 to tighten the legendary net
+    // (Mewtwo noise ceiling was only 122ms below old cutoff). Wild shinies
+    // still clear 2800 by 600ms+.
+    //   delay > 2800ms  -> SHINY
+    //   delay <= 2800ms -> NORMAL
+    if (textDelayMs > 2800) {
       const dev = avgDelay > 0 ? Math.round(textDelayMs - avgDelay) : null;
       const devStr = dev !== null ? ` avg=${Math.round(avgDelay)}ms dev=+${dev}ms` : '';
       return { signal: 'shiny', debug: `delay=${textDelayMs}ms${devStr} SHINY` };
