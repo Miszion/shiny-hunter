@@ -12,6 +12,7 @@ data/*.db-wal
 # Caches & calibration
 data/seed-schedule-cache.json
 data/switch-calibration.json
+data/delay-calibration.json
 data/hunt-state.json
 data/discord-bridge/
 
