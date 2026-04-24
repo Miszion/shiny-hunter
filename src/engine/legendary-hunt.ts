@@ -70,6 +70,60 @@ const BATTLE_DETECT_TIMEOUT_MS = 15_000;
 const STUCK_STATE_TIMEOUT_MS = 60_000;
 const STUCK_STATE_CHECK_INTERVAL_MS = 5_000;
 
+// Suspect-delay thresholds for diagnostic screenshots. The shiny classifier
+// lives in wild-hunt.ts and still uses a strict 3000ms cutoff — these
+// thresholds only decide whether to save a near-miss frame for later human
+// review. They do NOT affect classification or soft-reset behavior.
+const SUSPECT_ABSOLUTE_DELAY_MS = 2800;
+const SUSPECT_DELTA_OVER_AVG_MS = 500;
+// Delay before grabbing a post-reset frame. The soft reset happens on the
+// next tick, so by 3.5s we should be mid-boot / at the title screen, which
+// is the interesting diagnostic the user asked for.
+const SUSPECT_POST_FRAME_DELAY_MS = 3500;
+
+/**
+ * Pure predicate: is this encounter's text-appearance delay "suspicious" enough
+ * to warrant saving a diagnostic PNG? Does NOT classify the encounter as shiny.
+ *
+ * Two triggers (either one fires it):
+ *   - delay >= 2800ms (absolute): above the observed normal ceiling (2429ms)
+ *     but below the shiny cutoff (3000ms) — exactly the gap we want to study.
+ *   - delay > avgDelay + 500ms: a fresh outlier relative to the current rolling
+ *     baseline, even if it's below 2800ms in absolute terms.
+ */
+export function isSuspectDelay(textDelayMs: number, avgDelay: number): boolean {
+  if (textDelayMs <= 0) return false;
+  if (textDelayMs >= SUSPECT_ABSOLUTE_DELAY_MS) return true;
+  if (avgDelay > 0 && textDelayMs > avgDelay + SUSPECT_DELTA_OVER_AVG_MS) return true;
+  return false;
+}
+
+export interface SuspectWriteOpts {
+  lastFrame: Buffer | null;
+  textDelayMs: number;
+  avgDelay: number;
+  target: string;
+  attempts: number;
+  screenshotsDir: string;
+}
+
+/**
+ * Save a near-miss diagnostic PNG for this encounter, if the delay qualifies.
+ * Returns the written path, or null if nothing was written. Exported so tests
+ * can verify the file-naming and gating behavior without driving the full
+ * state machine.
+ */
+export async function writeSuspectIfNeeded(opts: SuspectWriteOpts): Promise<string | null> {
+  const { lastFrame, textDelayMs, avgDelay, target, attempts, screenshotsDir } = opts;
+  if (!lastFrame || !isSuspectDelay(textDelayMs, avgDelay)) return null;
+  const suspectPath = path.join(
+    screenshotsDir,
+    `legendary-suspect-${target}-${attempts}-delay${textDelayMs}.png`,
+  );
+  await fs.writeFile(suspectPath, lastFrame);
+  return suspectPath;
+}
+
 export class LegendaryHuntEngine extends EventEmitter {
   private state: LegendaryState = 'IDLE';
   private attempts = 0;
@@ -316,10 +370,13 @@ export class LegendaryHuntEngine extends EventEmitter {
       await this.wait(200);
     }
 
-    // Step 3: evaluate timing signal using shared wild/legendary calibration
+    // Step 3: evaluate timing signal using shared wild/legendary calibration.
+    // Capture avgDelay into a local so the suspect-screenshot branch below
+    // sees the *pre-update* baseline (same snapshot the classifier used).
+    const avgDelayAtEncounter = delayCalibration.getAverage();
     const timingResult = evaluateTimingSignal({
       textDelayMs: (textAppearedAt && textDelayMs > 0) ? textDelayMs : null,
-      avgDelay: delayCalibration.getAverage(),
+      avgDelay: avgDelayAtEncounter,
       historySize: delayCalibration.getHistorySize(),
       elapsedSinceBattle: Date.now() - battleDetectedAt,
     });
@@ -375,6 +432,50 @@ export class LegendaryHuntEngine extends EventEmitter {
         fs.writeFile(debugPath, lastFrame).catch(() => {});
       } catch {}
     }
+
+    // Near-miss diagnostic: save a frame whenever the text delay lands in
+    // the "suspiciously close to shiny but classifier said normal" band so
+    // the operator can eyeball whether the 3000ms cutoff is well-tuned.
+    // Fire-and-forget — must not delay or alter soft-reset behavior.
+    if (lastFrame && textDelayMs > 0 && isSuspectDelay(textDelayMs, avgDelayAtEncounter)) {
+      writeSuspectIfNeeded({
+        lastFrame,
+        textDelayMs,
+        avgDelay: avgDelayAtEncounter,
+        target: this.target,
+        attempts: this.attempts,
+        screenshotsDir: path.join(process.cwd(), config.paths.screenshots),
+      })
+        .then((p) => {
+          if (p) logger.info(`[Legendary] Suspect near-miss frame saved: ${p}`);
+        })
+        .catch(() => {});
+
+      // Deep suspects (>= SUSPECT_ABSOLUTE_DELAY_MS): also grab a frame
+      // after the soft reset completes so we can diff "what the battle
+      // screen showed" vs "what the emulator state looked like on reset".
+      // Scheduled async so soft reset timing is untouched.
+      if (textDelayMs >= SUSPECT_ABSOLUTE_DELAY_MS) {
+        const attempt = this.attempts;
+        const delay = textDelayMs;
+        const target = this.target;
+        setTimeout(() => {
+          if (!this.running) return;
+          this.frameSource
+            .captureFrame()
+            .then((frame) => {
+              const postPath = path.join(
+                process.cwd(),
+                config.paths.screenshots,
+                `legendary-suspect-${target}-${attempt}-delay${delay}-post.png`,
+              );
+              return fs.writeFile(postPath, frame);
+            })
+            .catch(() => {});
+        }, SUSPECT_POST_FRAME_DELAY_MS);
+      }
+    }
+
     if (this.attempts % 100 === 0) this.emit('milestone', this.getStatus());
     this.transition('RESET');
   }
