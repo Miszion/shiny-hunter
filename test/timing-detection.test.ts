@@ -1,25 +1,25 @@
 import { evaluateTimingSignal, makeShinyDecision } from '../src/engine/wild-hunt';
 
-// The wild-hunt classifier uses a single 3000ms binary split for text-appearance
+// The wild-hunt classifier uses a single 2800ms binary split for text-appearance
 // delay, derived from 8832 non-shiny calibration encounters (avg=2043ms,
-// max=2429ms) and shiny catches landing at 3800ms+ / no-text. Nothing has ever
-// been observed in the 2500-3500ms gap, so there is no "suspicious" or
-// "borderline" band at classification time. Diagnostic screenshots for the
-// near-miss 2800-3000ms band live in legendary-hunt.ts (see isSuspectDelay),
-// not here.
+// max=2429ms) and shiny catches landing at 3800ms+ / no-text. The cutoff was
+// dropped from 3000ms to 2800ms on 2026-04-24 to tighten the legendary net
+// (Mewtwo noise ceiling was only 122ms below the old cutoff). Nothing has
+// ever been observed in the 2429-3800ms gap among real encounters, so there
+// is still no "suspicious" or "borderline" band at classification time.
 
-describe('evaluateTimingSignal — 3000ms binary split', () => {
+describe('evaluateTimingSignal — 2800ms binary split', () => {
   const calibrated = { avgDelay: 2000, historySize: 30 };
   const uncalibrated = { avgDelay: 0, historySize: 2 };
 
-  test('3001ms = shiny', () => {
-    const r = evaluateTimingSignal({ textDelayMs: 3001, ...calibrated, elapsedSinceBattle: 3001 });
+  test('2801ms = shiny', () => {
+    const r = evaluateTimingSignal({ textDelayMs: 2801, ...calibrated, elapsedSinceBattle: 2801 });
     expect(r.signal).toBe('shiny');
     expect(r.debug).toContain('SHINY');
   });
 
-  test('3000ms = normal (boundary is strict >)', () => {
-    const r = evaluateTimingSignal({ textDelayMs: 3000, ...calibrated, elapsedSinceBattle: 3000 });
+  test('2800ms = normal (boundary is strict >)', () => {
+    const r = evaluateTimingSignal({ textDelayMs: 2800, ...calibrated, elapsedSinceBattle: 2800 });
     expect(r.signal).toBe('normal');
     expect(r.debug).toContain('normal');
   });
