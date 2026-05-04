@@ -18,7 +18,9 @@
     "test:rng": "jest rng.test",
     "test:switch": "jest switch-rng.test",
     "test:pid": "jest pid-identification.test",
-    "logs:all": "tail -f logs/combined.log logs/error.log logs/lua-bridge.log"
+    "logs:all": "tail -f logs/combined.log logs/error.log logs/lua-bridge.log",
+    "install-hooks": "sh scripts/install-hooks.sh",
+    "postinstall": "if [ -f scripts/install-hooks.sh ]; then sh scripts/install-hooks.sh; fi"
   },
   "dependencies": {
     "better-sqlite3": "^11.0.0",
