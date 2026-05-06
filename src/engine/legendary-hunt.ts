@@ -81,6 +81,41 @@ const SUSPECT_DELTA_OVER_AVG_MS = 500;
 // is the interesting diagnostic the user asked for.
 const SUSPECT_POST_FRAME_DELAY_MS = 3500;
 
+// Dense-window RNG instrumentation. Wall-clock estimator: NOT a true RNG
+// advance count (real advances tick on overworld VRAM updates), but with
+// our fixed input cadence the engage→detect interval is stable enough to
+// use as a tunable proxy. Calibration sweeps the preEngageWait offset until
+// the mean estimatedAdvance lands in the target shiny-PID window.
+const GBA_FRAME_MS = 1000 / 59.7275; // ≈ 16.7427
+const RUNTIME_CONFIG_PATH = '/Users/miszion/workplace/nexus-data/shiny-hunter/runtime-config.json';
+const MOLTRES_JSONL_PATH = '/Users/miszion/workplace/nexus-data/shiny-hunter/moltres-calibration.jsonl';
+
+interface RuntimeConfig {
+  preEngageWaitMs: number;
+  calibrationActive: boolean;
+  calibrationOffsetMs: number | null;
+}
+
+const DEFAULT_RUNTIME_CONFIG: RuntimeConfig = {
+  preEngageWaitMs: 0,
+  calibrationActive: false,
+  calibrationOffsetMs: null,
+};
+
+async function readRuntimeConfig(): Promise<RuntimeConfig> {
+  try {
+    const raw = await fs.readFile(RUNTIME_CONFIG_PATH, 'utf-8');
+    const parsed = JSON.parse(raw) as Partial<RuntimeConfig>;
+    return {
+      preEngageWaitMs: typeof parsed.preEngageWaitMs === 'number' ? parsed.preEngageWaitMs : 0,
+      calibrationActive: parsed.calibrationActive === true,
+      calibrationOffsetMs: typeof parsed.calibrationOffsetMs === 'number' ? parsed.calibrationOffsetMs : null,
+    };
+  } catch {
+    return DEFAULT_RUNTIME_CONFIG;
+  }
+}
+
 /**
  * Pure predicate: is this encounter's text-appearance delay "suspicious" enough
  * to warrant saving a diagnostic PNG? Does NOT classify the encounter as shiny.
@@ -140,6 +175,10 @@ export class LegendaryHuntEngine extends EventEmitter {
   private lastStateChangeAt = 0;
   private stuckStateCount = 0;
   private stuckStateWatchdog: ReturnType<typeof setInterval> | null = null;
+
+  // Per-cycle RNG instrumentation. Set in engage(), read in detectBattleResult().
+  private currentCycleStartedAt: number | null = null;
+  private currentCyclePreEngageWaitMs = 0;
 
   getStuckStateCount(): number {
     return this.stuckStateCount;
@@ -284,6 +323,13 @@ export class LegendaryHuntEngine extends EventEmitter {
   }
 
   private async engage(): Promise<void> {
+    const cfg = await readRuntimeConfig();
+    const effectiveWait = cfg.calibrationActive && cfg.calibrationOffsetMs != null
+      ? cfg.calibrationOffsetMs
+      : cfg.preEngageWaitMs;
+    this.currentCyclePreEngageWaitMs = effectiveWait;
+    if (effectiveWait > 0) await this.wait(effectiveWait);
+    this.currentCycleStartedAt = Date.now();
     const seqs = getStaticSequences(this.game, this.target);
     await this.executeSequence(seqs.interact);
     this.transition('DETECT');
@@ -387,6 +433,23 @@ export class LegendaryHuntEngine extends EventEmitter {
     const debugParts = [timingResult.debug];
     if (maxSparkleCount > 0) debugParts.push(maxSparkleDebug);
     const debug = debugParts.join(' | ');
+
+    // Dense-window calibration log. Best-effort, errors swallowed so a
+    // logger failure can't crash the hunt.
+    if (this.target === 'moltres' && this.currentCycleStartedAt != null) {
+      const engageToDetectMs = battleDetectedAt - this.currentCycleStartedAt;
+      const estimatedAdvance = Math.max(0, Math.round(engageToDetectMs / GBA_FRAME_MS));
+      const line = JSON.stringify({
+        cycleIdx: this.attempts,
+        ts: new Date().toISOString(),
+        preEngageWaitMs: this.currentCyclePreEngageWaitMs,
+        engageToDetectMs,
+        estimatedAdvance,
+        textDelayMs,
+        shiny: isShiny,
+      }) + '\n';
+      fs.appendFile(MOLTRES_JSONL_PATH, line).catch(() => {});
+    }
 
     if (isShiny) {
       const ts = Date.now();
