@@ -354,10 +354,13 @@ export class LegendaryHuntEngine extends EventEmitter {
     this.logMilestone('continueSelected');
     await this.executeSequence(seqs.loadSave);
     this.logMilestone('saveLoaded');
-    // B-spam through recap (save-recap dialogue after CONTINUE)
+    // B-spam through recap (save-recap dialogue after CONTINUE).
+    // 100ms inter-press gap: fast enough to drop ~1s vs 150ms baseline,
+    // still well above the FRLG dialog rate-gate. Excess B presses after
+    // recap closes are no-ops in overworld so over-mashing is harmless.
     for (let i = 0; i < 20 && this.running; i++) {
       await this.input.pressButton('B', 50);
-      await this.wait(150);
+      await this.wait(100);
     }
     await this.wait(400);
     this.logMilestone('bSpamDone');
@@ -406,7 +409,10 @@ export class LegendaryHuntEngine extends EventEmitter {
         this.logMilestone('battleDetected');
         break;
       }
-      await this.wait(150);
+      // 50ms poll: capture+isBattleScreen already costs ~30-80ms per
+      // iteration so real cadence sits around 100ms, comfortably above the
+      // 16.7ms GBA frame floor. Tightens average detection latency by ~50ms.
+      await this.wait(50);
     }
 
     if (!onBattle) {
