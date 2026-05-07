@@ -89,6 +89,21 @@ const SUSPECT_POST_FRAME_DELAY_MS = 3500;
 const GBA_FRAME_MS = 1000 / 59.7275; // ≈ 16.7427
 const RUNTIME_CONFIG_PATH = '/Users/miszion/workplace/nexus-data/shiny-hunter/runtime-config.json';
 const MOLTRES_JSONL_PATH = '/Users/miszion/workplace/nexus-data/shiny-hunter/moltres-calibration.jsonl';
+// Per-segment milestone log. Lines: {cycleIdx, milestone, t_ms_since_reset}.
+// Used to bridge the engage→detect-only advance estimator (PR #5) with a
+// reset→detect total used by offline RNG enumerators. Best-effort, errors
+// swallowed so a logger failure can't crash the hunt. Path is relative to
+// process.cwd() (PM2 sets it to the repo root) so a missing logs/ dir would
+// just fail the append, not crash.
+const MILESTONES_JSONL_PATH = path.join('logs', 'moltres-milestones.jsonl');
+type Milestone =
+  | 'softReset'
+  | 'titleSkipDone'
+  | 'continueSelected'
+  | 'saveLoaded'
+  | 'bSpamDone'
+  | 'engagePress'
+  | 'battleDetected';
 
 interface RuntimeConfig {
   preEngageWaitMs: number;
@@ -179,6 +194,26 @@ export class LegendaryHuntEngine extends EventEmitter {
   // Per-cycle RNG instrumentation. Set in engage(), read in detectBattleResult().
   private currentCycleStartedAt: number | null = null;
   private currentCyclePreEngageWaitMs = 0;
+
+  // Reset epoch for the current cycle. Set when softReset() returns; every
+  // milestone's `t_ms_since_reset` is computed against this. null between
+  // cycles or before the first reset.
+  private currentResetAt: number | null = null;
+  // Stable per-cycle id stamped at softReset time. `attempts` only ticks at
+  // detectBattleResult, so without this all pre-engage milestones would
+  // share the prior battle's id.
+  private currentCycleIdx = 0;
+
+  private logMilestone(milestone: Milestone): void {
+    if (this.target !== 'moltres' || this.currentResetAt == null) return;
+    const tMsSinceReset = Date.now() - this.currentResetAt;
+    const line = JSON.stringify({
+      cycleIdx: this.currentCycleIdx,
+      milestone,
+      t_ms_since_reset: tMsSinceReset,
+    }) + '\n';
+    fs.appendFile(MILESTONES_JSONL_PATH, line).catch(() => {});
+  }
 
   getStuckStateCount(): number {
     return this.stuckStateCount;
@@ -281,6 +316,9 @@ export class LegendaryHuntEngine extends EventEmitter {
     switch (this.state) {
       case 'SOFT_RESET':
         await this.input.softReset();
+        this.currentResetAt = Date.now();
+        this.currentCycleIdx++;
+        this.logMilestone('softReset');
         this.transition('WAIT_BOOT');
         break;
       case 'WAIT_BOOT':
@@ -312,13 +350,17 @@ export class LegendaryHuntEngine extends EventEmitter {
   private async titleAndLoad(): Promise<void> {
     const seqs = getStaticSequences(this.game, this.target);
     await this.executeSequence(seqs.title);
+    this.logMilestone('titleSkipDone');
+    this.logMilestone('continueSelected');
     await this.executeSequence(seqs.loadSave);
+    this.logMilestone('saveLoaded');
     // B-spam through recap (save-recap dialogue after CONTINUE)
     for (let i = 0; i < 20 && this.running; i++) {
       await this.input.pressButton('B', 50);
       await this.wait(150);
     }
     await this.wait(400);
+    this.logMilestone('bSpamDone');
     this.transition('ENGAGE');
   }
 
@@ -332,6 +374,7 @@ export class LegendaryHuntEngine extends EventEmitter {
     this.currentCycleStartedAt = Date.now();
     const seqs = getStaticSequences(this.game, this.target);
     await this.executeSequence(seqs.interact);
+    this.logMilestone('engagePress');
     this.transition('DETECT');
   }
 
@@ -360,6 +403,7 @@ export class LegendaryHuntEngine extends EventEmitter {
       if (await isBattleScreen(frame)) {
         onBattle = true;
         battleDetectedAt = Date.now();
+        this.logMilestone('battleDetected');
         break;
       }
       await this.wait(150);
