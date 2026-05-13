@@ -21,6 +21,7 @@ data/sprites/
 
 # Logs
 logs/*.log
+logs/*.jsonl
 
 # Screenshots (debug & encounter)
 screenshots/*.png
