@@ -204,13 +204,14 @@ export class LegendaryHuntEngine extends EventEmitter {
   // share the prior battle's id.
   private currentCycleIdx = 0;
 
-  private logMilestone(milestone: Milestone): void {
+  private logMilestone(milestone: Milestone, extra?: Record<string, number>): void {
     if (this.target !== 'moltres' || this.currentResetAt == null) return;
     const tMsSinceReset = Date.now() - this.currentResetAt;
     const line = JSON.stringify({
       cycleIdx: this.currentCycleIdx,
       milestone,
       t_ms_since_reset: tMsSinceReset,
+      ...(extra ?? {}),
     }) + '\n';
     fs.appendFile(MILESTONES_JSONL_PATH, line).catch(() => {});
   }
@@ -374,10 +375,16 @@ export class LegendaryHuntEngine extends EventEmitter {
       : cfg.preEngageWaitMs;
     this.currentCyclePreEngageWaitMs = effectiveWait;
     if (effectiveWait > 0) await this.wait(effectiveWait);
+    // RNG jitter: spread engage-press timing 0-300ms to widen sampled advance
+    // window and escape dead-zone clusters. Detection cutoff (2800ms) and
+    // signal classification untouched - this only varies *which* RNG advance
+    // we sample, not whether we recognize a shiny when we hit one.
+    const jitterMs = Math.floor(Math.random() * 301);
+    if (jitterMs > 0) await this.wait(jitterMs);
     this.currentCycleStartedAt = Date.now();
     const seqs = getStaticSequences(this.game, this.target);
     await this.executeSequence(seqs.interact);
-    this.logMilestone('engagePress');
+    this.logMilestone('engagePress', { jitterMs });
     this.transition('DETECT');
   }
 
